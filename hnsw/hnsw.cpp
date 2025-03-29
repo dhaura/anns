@@ -15,14 +15,14 @@ struct Node {
     int id;
     int node_max_level;
     std::vector<float> feature_vector;
-    std::map<int, std::vector<std::pair<int, float>>> neighbors;
+    std::vector<std::vector<std::pair<int, float>>> neighbors;
 };
 
 struct HNSW {
     
     int max_level = -1;
-    Node* entry_point = nullptr;
-    std::vector<std::map<int, Node>> nodes;
+    int entry_point = -1;
+    std::vector<Node> nodes;
 };;
 
 static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
@@ -93,7 +93,7 @@ std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vect
     std::vector<int> visited_node_ids;
 
     while (candidates.size() > 0 && find_min(candidates) <= find_min(winners)) {
-        Node current_node = hnsw.nodes[level][candidates.back().first];
+        Node current_node = hnsw.nodes[candidates.back().first];
         candidates.pop_back();
 
         for (const auto& _neighbor : current_node.neighbors[level]) {
@@ -103,7 +103,7 @@ std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vect
             }
             visited_node_ids.push_back(neighbor);
 
-            float distance = euclidean_distance(query_feature_vec, hnsw.nodes[level][neighbor].feature_vector);
+            float distance = euclidean_distance(query_feature_vec, hnsw.nodes[neighbor].feature_vector);
             candidates.push_back(std::make_pair(neighbor, distance));
             winners.push_back(std::make_pair(neighbor, distance));
         }
@@ -116,7 +116,7 @@ std::vector<std::pair<int, float>> query_hnsw(HNSW& hnsw, std::vector<float> que
     
     std::vector<std::pair<int, float>> results;
     std::vector<std::pair<int, float>> candidates;
-    candidates.push_back(std::make_pair(hnsw.entry_point->id, euclidean_distance(query_feature_vec, hnsw.entry_point->feature_vector)));
+    candidates.push_back(std::make_pair(hnsw.entry_point, euclidean_distance(query_feature_vec, hnsw.nodes[hnsw.entry_point].feature_vector)));
 
     for (int j = hnsw.max_level; j > 0; --j) {
         candidates = search_level(hnsw, j, query_feature_vec, 1, candidates);
@@ -135,18 +135,19 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
         node->id = i;
         node->feature_vector = feature_vec;
 
-        if (hnsw.entry_point == nullptr) {
-            hnsw.entry_point = node;
-            for (int j = 0; j <= hnsw.max_level; ++j) {
-                hnsw.nodes[j][i] = *node;
-            }
+        if (hnsw.entry_point == -1) {
+            node->node_max_level = hnsw.max_level;
+            node->neighbors.resize(hnsw.max_level + 1);
+            hnsw.entry_point = i;
+            hnsw.nodes[i] = *node;
             continue;
         }
 
         int level = rand() % (hnsw.max_level + 1);
         node->node_max_level = level;
+        node->neighbors.resize(level + 1);
         std::vector<std::pair<int, float>> candidates;
-        candidates.push_back(std::make_pair(hnsw.entry_point->id, euclidean_distance(feature_vec, hnsw.entry_point->feature_vector)));
+        candidates.push_back(std::make_pair(hnsw.entry_point, euclidean_distance(feature_vec, hnsw.nodes[hnsw.entry_point].feature_vector)));
 
         for (int j = hnsw.max_level; j > level; --j) {
             candidates = search_level(hnsw, j, feature_vec, 1, candidates);
@@ -157,20 +158,20 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
             for (const auto& candidate : find_top_K(candidates, M)) {
                 node->neighbors[j].push_back(std::make_pair(candidate.first, candidate.second));
 
-                std::vector<std::pair<int, float>> candidate_neighbors = hnsw.nodes[j][candidate.first].neighbors[j];
+                std::vector<std::pair<int, float>> candidate_neighbors = hnsw.nodes[candidate.first].neighbors[j];
                 candidate_neighbors.push_back(std::make_pair(node->id, candidate.second));
-                hnsw.nodes[j][candidate.first].neighbors[j] = find_top_K(candidate_neighbors, M);
+                hnsw.nodes[candidate.first].neighbors[j] = find_top_K(candidate_neighbors, M);
             }
             candidates = find_top_K(candidates, 1);
-            hnsw.nodes.at(j)[i] = *node;
         }
+        hnsw.nodes[i] = *node;
     }
 }
 
 int main(int argc, char** argv) {
 
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M>" << std::endl;
         return 1;
     }
     
@@ -179,21 +180,22 @@ int main(int argc, char** argv) {
     int dimension = std::stoi(argv[3]);
     int k = std::stoi(argv[4]);
     int num_of_levels = std::stoi(argv[5]);
+    int l = std::stoi(argv[6]);
+    int M = std::stoi(argv[7]);
 
     ValueType2DVector<float> datamatrix;
     read_txt(input_filepath, &datamatrix);
 
     HNSW hnsw;
     hnsw.max_level = num_of_levels - 1;
-    hnsw.nodes.resize(num_of_levels);
+    hnsw.nodes.resize(input_size);
 
-    build_hnsw(hnsw, input_size, datamatrix, k, k);
+    build_hnsw(hnsw, input_size, datamatrix, l, M);
     
     // Print the HNSW structure
     for (int i = 0; i < num_of_levels; ++i) {
-        std::cout << "---------------------------------" << std::endl;
-        std::cout << "Level " << i << ":" << std::endl;
-        std::cout << "Number of nodes: " << hnsw.nodes[i].size() << std::endl;
+        // std::cout << "---------------------------------" << std::endl;
+        // std::cout << "Level " << i << ":" << std::endl;
         // for (const auto& node : hnsw.nodes[i]) {
         //     std::cout << "Node ID: " << node.first << std::endl;
         //     std::cout << "Neighbors: ";
@@ -209,7 +211,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<float> query_feature_vec = {0.9, 0.2, 1, 4.5}; // Example query vector
-    std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query_feature_vec, k, k);
+    std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query_feature_vec, k, l);
     std::cout << "Query results:" << std::endl;
     for (const auto& result : results) {
         std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
@@ -226,6 +228,22 @@ int main(int argc, char** argv) {
     for (const auto& result : brute_force_results) {
         std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
     }
+    std::cout << "---------------------------------" << std::endl;
+
+    // Calculate recall
+    std::vector<int> hnsw_ids, brute_force_ids;
+    for (const auto& result : results) {
+        hnsw_ids.push_back(result.first);
+    }
+    for (const auto& result : brute_force_results) {
+        brute_force_ids.push_back(result.first);
+    }
+    std::sort(hnsw_ids.begin(), hnsw_ids.end());
+    std::sort(brute_force_ids.begin(), brute_force_ids.end());
+    std::vector<int> intersection;
+    std::set_intersection(hnsw_ids.begin(), hnsw_ids.end(), brute_force_ids.begin(), brute_force_ids.end(), std::back_inserter(intersection));
+    float recall = static_cast<float>(intersection.size()) / k;
+    std::cout << "Recall: " << recall << std::endl;
     std::cout << "---------------------------------" << std::endl;
     return 0;
 }
