@@ -193,6 +193,9 @@ int main(int argc, char** argv) {
     ValueType2DVector<float> datamatrix;
     ValueType2DVector<float> local_datamatrix;
     int local_input_size = input_size / world_size;
+    if (rank == world_size - 1) {
+        local_input_size = input_size - (world_size - 1) * local_input_size;
+    }
 
     if (rank == 0) {
         read_txt(input_filepath, &datamatrix);
@@ -215,13 +218,11 @@ int main(int argc, char** argv) {
             }
 
             int num_elements = flattened_data.size();
-            MPI_Send(&num_elements, 1, MPI_INT, i, 0, MPI_COMM_WORLD);  // First send the size
             MPI_Send(flattened_data.data(), num_elements, MPI_FLOAT, i, 1, MPI_COMM_WORLD);
         }
     } else {
-        int num_elements;
-        MPI_Recv(&num_elements, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);  // Receive the size
-
+        int num_elements = dimension * local_input_size;
+        
         std::vector<float> flattened_data(num_elements);
         MPI_Recv(flattened_data.data(), num_elements, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
