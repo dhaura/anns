@@ -1,11 +1,13 @@
 #include <vector>
 #include <map>
+#include <unordered_set>
 #include <math.h>
 #include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <numeric>
 
 template <typename VALUE_TYPE>
 using ValueType2DVector = std::vector<std::vector<VALUE_TYPE>>;
@@ -87,6 +89,40 @@ float euclidean_distance(const std::vector<float>& a, const std::vector<float>& 
     return std::sqrt(sum);
 }
 
+float calculateIntersection(const std::vector<int>& hnsw_ids, const std::vector<int>& brute_force_ids, int k) {
+    
+    std::unordered_set<int> hnsw_set(hnsw_ids.begin(), hnsw_ids.end());
+
+    int intersection_count = std::accumulate(brute_force_ids.begin(), brute_force_ids.end(), 0, 
+        [&hnsw_set](int count, int id) {
+            return count + (hnsw_set.count(id) > 0);
+        });
+
+    return static_cast<float>(intersection_count) / k;
+}
+
+float calculate_recall(std::vector<std::pair<int, float>>& hnsw_results, std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix, int k) {
+
+    std::vector<std::pair<int, float>> brute_force_results;
+    for (int i = 0; i < datamatrix.size(); ++i) {
+        float distance = euclidean_distance(query_vector, datamatrix[i]);
+        brute_force_results.push_back(std::make_pair(i, distance));
+    }
+    brute_force_results = find_top_K(brute_force_results, k);
+    
+    std::vector<int> brute_force_ids;
+    for (const auto& result : brute_force_results) {
+        brute_force_ids.push_back(result.first);
+    }
+
+    std::vector<int> hnsw_ids;
+    for (const auto& result : hnsw_results) {
+        hnsw_ids.push_back(result.first);
+    }
+    
+    return calculateIntersection(hnsw_ids, brute_force_ids, k);
+}
+
 std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vector<float> query_feature_vec, int factor, std::vector<std::pair<int, float>>& candidates) {
     
     std::vector<std::pair<int, float>> winners = std::vector<std::pair<int, float>>(candidates.begin(), candidates.end());
@@ -95,6 +131,7 @@ std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vect
     while (candidates.size() > 0 && find_min(candidates) <= find_min(winners)) {
         Node current_node = hnsw.nodes[candidates.back().first];
         candidates.pop_back();
+        visited_node_ids.push_back(current_node.id);
 
         for (const auto& _neighbor : current_node.neighbors[level]) {
             int neighbor = _neighbor.first;
@@ -171,7 +208,7 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
 int main(int argc, char** argv) {
 
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M> <query_input_filepath>" << std::endl;
         return 1;
     }
     
@@ -182,6 +219,7 @@ int main(int argc, char** argv) {
     int num_of_levels = std::stoi(argv[5]);
     int l = std::stoi(argv[6]);
     int M = std::stoi(argv[7]);
+    std::string query_input_filepath = argv[8];
 
     ValueType2DVector<float> datamatrix;
     read_txt(input_filepath, &datamatrix);
@@ -192,59 +230,21 @@ int main(int argc, char** argv) {
 
     build_hnsw(hnsw, input_size, datamatrix, l, M);
     
-    // Print the HNSW structure
-    for (int i = 0; i < num_of_levels; ++i) {
-        // std::cout << "---------------------------------" << std::endl;
-        // std::cout << "Level " << i << ":" << std::endl;
-        // for (const auto& node : hnsw.nodes[i]) {
-        //     std::cout << "Node ID: " << node.first << std::endl;
-        //     std::cout << "Neighbors: ";
-        //     if (node.second.neighbors.find(i) != node.second.neighbors.end()) {
-        //         for (const auto& _neighbor : node.second.neighbors.at(i)) {
-        //             int neighbor = _neighbor.first;
-        //             std::cout << neighbor << " ";
-        //         }
-        //     }
-        //     std::cout << std::endl;
-        // }
-        std::cout << std::endl;
+    ValueType2DVector<float> query_datamatrix;
+    read_txt(query_input_filepath, &query_datamatrix);
+
+    std::vector<float> recalls;
+
+    for (auto& query : query_datamatrix) {
+        std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query, k, l);
+        float recall = calculate_recall(results, query, datamatrix, k);
+        recalls.push_back(recall);
+        std::cout << "Recall: " << recall << std::endl;
     }
 
-    std::vector<float> query_feature_vec = {0.9, 0.2, 1, 4.5}; // Example query vector
-    std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query_feature_vec, k, l);
-    std::cout << "Query results:" << std::endl;
-    for (const auto& result : results) {
-        std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
-    }
-    
-    // Find top k usinf brute force
-    std::vector<std::pair<int, float>> brute_force_results;
-    for (int i = 0; i < input_size; ++i) {
-        float distance = euclidean_distance(query_feature_vec, datamatrix[i]);
-        brute_force_results.push_back(std::make_pair(i, distance));
-    }
-    brute_force_results = find_top_K(brute_force_results, k);
-    std::cout << "Brute force results:" << std::endl;
-    for (const auto& result : brute_force_results) {
-        std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
-    }
-    std::cout << "---------------------------------" << std::endl;
+    float mean_recall = std::accumulate(recalls.begin(), recalls.end(), 0.0) / recalls.size();
+    std::cout << "Mean Recall: " << mean_recall << std::endl;
 
-    // Calculate recall
-    std::vector<int> hnsw_ids, brute_force_ids;
-    for (const auto& result : results) {
-        hnsw_ids.push_back(result.first);
-    }
-    for (const auto& result : brute_force_results) {
-        brute_force_ids.push_back(result.first);
-    }
-    std::sort(hnsw_ids.begin(), hnsw_ids.end());
-    std::sort(brute_force_ids.begin(), brute_force_ids.end());
-    std::vector<int> intersection;
-    std::set_intersection(hnsw_ids.begin(), hnsw_ids.end(), brute_force_ids.begin(), brute_force_ids.end(), std::back_inserter(intersection));
-    float recall = static_cast<float>(intersection.size()) / k;
-    std::cout << "Recall: " << recall << std::endl;
-    std::cout << "---------------------------------" << std::endl;
     return 0;
 }
 

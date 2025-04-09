@@ -1,4 +1,5 @@
 #include <vector>
+#include <unordered_set>
 #include <map>
 #include <math.h>
 #include <algorithm>
@@ -6,6 +7,9 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <numeric>
+#include <algorithm>
+#include <random>
 #include <mpi.h>
 
 template <typename VALUE_TYPE>
@@ -28,8 +32,8 @@ struct HNSW {
 
 static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
     
-    std::ifstream infile(filename); // Open the file for reading
-    std::vector<std::vector<float>> data; // Vector to hold the loaded data
+    std::ifstream infile(filename); // Open the file for reading.
+    std::vector<std::vector<float>> data; // Vector to hold the loaded data.
 
     if (infile) {
         std::string line;
@@ -38,17 +42,17 @@ static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix)
             std::istringstream iss(line);
             float value;
 
-            // Read each value (label followed by features)
+            // Read each value (label followed by features).
             while (iss >> value) {
                 row.push_back(value);
             }
 
-            // Add the row (data vector) to the data vector
+            // Add the row (data vector) to the data vector.
             data.push_back(row);
         }
         datamatrix->resize(data.size());
-        for(int i=0;i<data.size();i++){
-            (*datamatrix)[i]=data[i];
+        for(int i = 0; i < data.size(); i++){
+            (*datamatrix)[i] = data[i];
         }
     } else {
         std::cerr << "Error opening file: " << filename << std::endl;
@@ -88,6 +92,40 @@ float euclidean_distance(const std::vector<float>& a, const std::vector<float>& 
     return std::sqrt(sum);
 }
 
+float calculateIntersection(const std::vector<int>& hnsw_ids, const std::vector<int>& brute_force_ids, int k) {
+    
+    std::unordered_set<int> hnsw_set(hnsw_ids.begin(), hnsw_ids.end());
+
+    int intersection_count = std::accumulate(brute_force_ids.begin(), brute_force_ids.end(), 0, 
+        [&hnsw_set](int count, int id) {
+            return count + (hnsw_set.count(id) > 0);
+        });
+
+    return static_cast<float>(intersection_count) / k;
+}
+
+float calculate_recall(std::vector<std::pair<int, float>>& hnsw_results, std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix, int k) {
+
+    std::vector<std::pair<int, float>> brute_force_results;
+    for (int i = 0; i < datamatrix.size(); ++i) {
+        float distance = euclidean_distance(query_vector, datamatrix[i]);
+        brute_force_results.push_back(std::make_pair(i, distance));
+    }
+    brute_force_results = find_top_K(brute_force_results, k);
+
+    std::vector<int> brute_force_ids;
+    for (const auto& result : brute_force_results) {
+        brute_force_ids.push_back(result.first);
+    }
+
+    std::vector<int> hnsw_ids;
+    for (const auto& result : hnsw_results) {
+        hnsw_ids.push_back(result.first);
+    }
+    
+    return calculateIntersection(hnsw_ids, brute_force_ids, k);
+}
+
 std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vector<float> query_feature_vec, int factor, std::vector<std::pair<int, float>>& candidates) {
     
     std::vector<std::pair<int, float>> winners = std::vector<std::pair<int, float>>(candidates.begin(), candidates.end());
@@ -96,6 +134,7 @@ std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vect
     while (candidates.size() > 0 && find_min(candidates) <= find_min(winners)) {
         Node current_node = hnsw.nodes[candidates.back().first];
         candidates.pop_back();
+        visited_node_ids.push_back(current_node.id);
 
         for (const auto& _neighbor : current_node.neighbors[level]) {
             int neighbor = _neighbor.first;
@@ -127,14 +166,15 @@ std::vector<std::pair<int, float>> query_hnsw(HNSW& hnsw, std::vector<float> que
     return results;
 }
 
-void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix, int l, int M, int rank, int world_size, int local_input_size) {
+void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix, int l, int M, int rank, int world_size) {
 
-    for (int i = 0; i < local_input_size; ++i) {
+    int local_input_size = input_size / world_size;
+    for (int i = 0; i < datamatrix.size(); ++i) {
         const auto& feature_vec = datamatrix[i];
 
         Node* node = new Node();
         node->id = i + rank * local_input_size;
-        node->feature_vector = feature_vec;
+        node->feature_vector = feature_vec;  
 
         if (hnsw.entry_point == -1) {
             node->node_max_level = hnsw.max_level;
@@ -172,7 +212,7 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
 int main(int argc, char** argv) {
 
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M> <query_inpuy_file_path>" << std::endl;
         return 1;
     }
     
@@ -183,6 +223,7 @@ int main(int argc, char** argv) {
     int num_of_levels = std::stoi(argv[5]);
     int l = std::stoi(argv[6]);
     int M = std::stoi(argv[7]);
+    std::string query_input_filepath = argv[8];
 
     MPI_Init(&argc, &argv);
     
@@ -205,6 +246,10 @@ int main(int argc, char** argv) {
             local_datamatrix[i] = datamatrix[i];
         }
 
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(datamatrix.begin(), datamatrix.end(), g);
+        
         for (int i = 1; i < world_size; ++i) {
             int start_index = i * local_input_size;
             int end_index = (i + 1) * local_input_size;
@@ -223,14 +268,13 @@ int main(int argc, char** argv) {
     } else {
         int num_elements = dimension * local_input_size;
         
-        std::vector<float> flattened_data(num_elements);
-        MPI_Recv(flattened_data.data(), num_elements, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        std::vector<float> flattened_data_recv(num_elements);
+        MPI_Recv(flattened_data_recv.data(), num_elements, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        // Reconstruct 2D vector
         local_datamatrix.resize(local_input_size);
         int index = 0;
         for (int i = 0; i < local_input_size; ++i) {
-            local_datamatrix[i].assign(flattened_data.begin() + index, flattened_data.begin() + index + dimension);
+            local_datamatrix[i].assign(flattened_data_recv.begin() + index, flattened_data_recv.begin() + index + dimension);
             index += dimension;
         }
     }
@@ -238,76 +282,32 @@ int main(int argc, char** argv) {
     HNSW hnsw;
     hnsw.max_level = num_of_levels - 1;
 
-    build_hnsw(hnsw, input_size, local_datamatrix, l, M, rank, world_size, local_input_size);
-    // std::cout << "Process " << rank << " finished building HNSW." << std::endl;
-    
-    // Print the HNSW structure
-    for (int i = 0; i < num_of_levels; ++i) {
-        // std::cout << "---------------------------------" << std::endl;
-        // std::cout << "Level " << i << ":" << std::endl;
-        // for (const auto& node : hnsw.nodes[i]) {
-        //     std::cout << "Node ID: " << node.first << std::endl;
-        //     std::cout << "Neighbors: ";
-        //     if (node.second.neighbors.find(i) != node.second.neighbors.end()) {
-        //         for (const auto& _neighbor : node.second.neighbors.at(i)) {
-        //             int neighbor = _neighbor.first;
-        //             std::cout << neighbor << " ";
-        //         }
-        //     }
-        //     std::cout << std::endl;
-        // }
-        std::cout << std::endl;
-    }
+    build_hnsw(hnsw, input_size, local_datamatrix, l, M, rank, world_size);
 
-    std::vector<float> query_feature_vec = {0.9, 0.2, 1, 4.5}; // Example query vector
-    std::vector<std::pair<int, float>> local_results = query_hnsw(hnsw, query_feature_vec, k, l);
-    std::vector<std::pair<int, float>> results(k * world_size);
-    
-    MPI_Gather(local_results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, 0, MPI_COMM_WORLD);
     MPI_Barrier(MPI_COMM_WORLD);
+
+    ValueType2DVector<float> query_datamatrix;
+    read_txt(query_input_filepath, &query_datamatrix);
+
+    std::vector<float> recalls;
+
+    for (auto& query : query_datamatrix) {
+        std::vector<std::pair<int, float>> local_results = query_hnsw(hnsw, query, k, l);
+        std::vector<std::pair<int, float>> results(k * world_size);
+        MPI_Gather(local_results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, 0, MPI_COMM_WORLD);
+        
+        if (rank == 0) {
+            std::vector<std::pair<int, float>> final_results = find_top_K(results, k);
+            float recall = calculate_recall(final_results, query, datamatrix, k);
+            recalls.push_back(recall);
+            std::cout << "Recall: " << recall << std::endl;
+        }
+    }
     
     if (rank == 0) {
-        std::cout << "---------------------------------" << std::endl;
-        std::cout << "Query results:" << std::endl;
-        for (const auto& result : results) {
-            std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
-        }
-
-         // Find top k usinf brute force
-        std::vector<std::pair<int, float>> brute_force_results;
-        for (int i = 0; i < input_size; ++i) {
-            float distance = euclidean_distance(query_feature_vec, datamatrix[i]);
-            brute_force_results.push_back(std::make_pair(i, distance));
-        }
-        brute_force_results = find_top_K(brute_force_results, k);
-        std::cout << "Brute force results:" << std::endl;
-        for (const auto& result : brute_force_results) {
-            std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
-        }
-        std::cout << "---------------------------------" << std::endl;
-
-        std::vector<std::pair<int, float>> final_results = find_top_K(results, k);
-        std::cout << "Final results:" << std::endl;
-        for (const auto& result : final_results) {
-            std::cout << "Node ID: " << result.first << ", Distance: " << result.second << std::endl;
-        }
-        std::cout << "---------------------------------" << std::endl;
-
-        // Calculate recall
-        std::vector<int> hnsw_ids, brute_force_ids;
-        for (const auto& result : final_results) {
-            hnsw_ids.push_back(result.first);
-        }
-        for (const auto& result : brute_force_results) {
-            brute_force_ids.push_back(result.first);
-        }
-        std::sort(hnsw_ids.begin(), hnsw_ids.end());
-        std::sort(brute_force_ids.begin(), brute_force_ids.end());
-        std::vector<int> intersection;
-        std::set_intersection(hnsw_ids.begin(), hnsw_ids.end(), brute_force_ids.begin(), brute_force_ids.end(), std::back_inserter(intersection));
-        float recall = static_cast<float>(intersection.size()) / k;
-        std::cout << "Recall: " << recall << std::endl;
-        std::cout << "---------------------------------" << std::endl;
+        float mean_recall = std::accumulate(recalls.begin(), recalls.end(), 0.0) / recalls.size();
+        std::cout << "Mean Recall: " << mean_recall << std::endl;
+        std::cout << euclidean_distance({5.9, 3.0, 5.1, 1.8}, {0.9, 0.2, 1.0, 4.5}) << std::endl;
     }
     
     MPI_Finalize();
