@@ -211,6 +211,12 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
 
 int main(int argc, char** argv) {
 
+    MPI_Init(&argc, &argv);
+    
+    int rank, world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
     if (argc < 6) {
         std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M> <query_inpuy_file_path>" << std::endl;
         return 1;
@@ -224,12 +230,6 @@ int main(int argc, char** argv) {
     int l = std::stoi(argv[6]);
     int M = std::stoi(argv[7]);
     std::string query_input_filepath = argv[8];
-
-    MPI_Init(&argc, &argv);
-    
-    int rank, world_size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
     ValueType2DVector<float> datamatrix;
     ValueType2DVector<float> local_datamatrix;
@@ -246,9 +246,9 @@ int main(int argc, char** argv) {
             local_datamatrix[i] = datamatrix[i];
         }
 
-        std::random_device rd;
-        std::mt19937 g(rd());
-        std::shuffle(datamatrix.begin(), datamatrix.end(), g);
+        // std::random_device rd;
+        // std::mt19937 g(rd());
+        // std::shuffle(datamatrix.begin(), datamatrix.end(), g);
         
         for (int i = 1; i < world_size; ++i) {
             int start_index = i * local_input_size;

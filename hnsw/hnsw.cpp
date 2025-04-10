@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <numeric>
+#include <chrono>
 
 template <typename VALUE_TYPE>
 using ValueType2DVector = std::vector<std::vector<VALUE_TYPE>>;
@@ -48,8 +49,8 @@ static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix)
             data.push_back(row);
         }
         datamatrix->resize(data.size());
-        for(int i=0;i<data.size();i++){
-            (*datamatrix)[i]=data[i];
+        for (int i = 0; i < data.size(); i++) {
+            (*datamatrix)[i] = data[i];
         }
     } else {
         std::cerr << "Error opening file: " << filename << std::endl;
@@ -224,22 +225,39 @@ int main(int argc, char** argv) {
     ValueType2DVector<float> datamatrix;
     read_txt(input_filepath, &datamatrix);
 
+    auto hnsw_build_start = std::chrono::high_resolution_clock::now();
+    
     HNSW hnsw;
     hnsw.max_level = num_of_levels - 1;
     hnsw.nodes.resize(input_size);
 
     build_hnsw(hnsw, input_size, datamatrix, l, M);
+
+    auto hnsw_build_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> hnsw_build_duration = hnsw_build_end - hnsw_build_start;
+    std::cout << "Time taken to build HNSW index: " << hnsw_build_duration.count() << " seconds\n";
     
     ValueType2DVector<float> query_datamatrix;
     read_txt(query_input_filepath, &query_datamatrix);
 
-    std::vector<float> recalls;
-
-    for (auto& query : query_datamatrix) {
+    auto search_start = std::chrono::high_resolution_clock::now();
+    
+    std::vector<std::vector<std::pair<int, float>>> all_results;
+    for (const auto& query : query_datamatrix) {
         std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query, k, l);
+        all_results.push_back(results);
+    }
+
+    auto search_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> search_duration = search_end - search_start;
+    std::cout << "Time taken for search: " << search_duration.count() << " seconds\n";
+
+    std::vector<float> recalls;
+    for (int i = 0; i < query_datamatrix.size(); ++i) {
+        std::vector<float> query = query_datamatrix[i];
+        std::vector<std::pair<int, float>> results = all_results[i];
         float recall = calculate_recall(results, query, datamatrix, k);
         recalls.push_back(recall);
-        std::cout << "Recall: " << recall << std::endl;
     }
 
     float mean_recall = std::accumulate(recalls.begin(), recalls.end(), 0.0) / recalls.size();
