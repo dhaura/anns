@@ -7,7 +7,7 @@
 #include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
-static void read_txt(std::string filename, float* data, int input_size, int dimension) {
+void read_txt(std::string filename, float* data, int input_size, int dimension) {
     
     std::ifstream infile(filename); // Open the file for reading
 
@@ -33,7 +33,7 @@ static void read_txt(std::string filename, float* data, int input_size, int dime
 
 int main(int argc, char** argv) {
 
-    if (argc < 6) {
+    if (argc < 9) {
         std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <M> <ef_construction> <num_threads> <query_input_filepath> <query_input_size>" << std::endl;
         return 1;
     }
@@ -78,12 +78,11 @@ int main(int argc, char** argv) {
 
     // Time the search
     double search_start = omp_get_wtime();
-
-    std::vector<int> results(query_input_size);
+    std::vector<int> hnsw_ids(query_input_size);
     #pragma omp parallel for num_threads(p)
     for (int i = 0; i < query_input_size; i++) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(query_data + i * dimension, 1);
-        results[i] = result.top().second;
+        hnsw_ids[i] = result.top().second;
     }
 
     double search_end = omp_get_wtime();
@@ -94,9 +93,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < query_input_size; i++) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_brute->searchKnn(query_data + i * dimension, 1);
         int brute_force_id = result.top().second;
-        std::cout << "Brute force id: " << brute_force_id << "\n";
-        std::cout << "HNSW id: " << results[i] << "\n";
-        if (results[i] == brute_force_id) {
+        if (hnsw_ids[i] == brute_force_id) {
             correct++;
         }
     }

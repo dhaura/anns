@@ -8,7 +8,7 @@
 #include <sstream>
 #include <string>
 #include <numeric>
-#include <chrono>
+#include <omp.h>
 
 template <typename VALUE_TYPE>
 using ValueType2DVector = std::vector<std::vector<VALUE_TYPE>>;
@@ -28,7 +28,7 @@ struct HNSW {
     std::vector<Node> nodes;
 };
 
-static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
+void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
     
     std::ifstream infile(filename); // Open the file for reading
     std::vector<std::vector<float>> data; // Vector to hold the loaded data
@@ -90,38 +90,21 @@ float euclidean_distance(const std::vector<float>& a, const std::vector<float>& 
     return std::sqrt(sum);
 }
 
-float calculateIntersection(const std::vector<int>& hnsw_ids, const std::vector<int>& brute_force_ids, int k) {
-    
-    std::unordered_set<int> hnsw_set(hnsw_ids.begin(), hnsw_ids.end());
+int query_brute_force(std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix) {
 
-    int intersection_count = std::accumulate(brute_force_ids.begin(), brute_force_ids.end(), 0, 
-        [&hnsw_set](int count, int id) {
-            return count + (hnsw_set.count(id) > 0);
-        });
+    std::pair<int, float> brute_force_results;
+    brute_force_results.first = -1;
+    brute_force_results.second = std::numeric_limits<float>::max();
 
-    return static_cast<float>(intersection_count) / k;
-}
-
-float calculate_recall(std::vector<std::pair<int, float>>& hnsw_results, std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix, int k) {
-
-    std::vector<std::pair<int, float>> brute_force_results;
     for (int i = 0; i < datamatrix.size(); ++i) {
         float distance = euclidean_distance(query_vector, datamatrix[i]);
-        brute_force_results.push_back(std::make_pair(i, distance));
-    }
-    brute_force_results = find_top_K(brute_force_results, k);
-    
-    std::vector<int> brute_force_ids;
-    for (const auto& result : brute_force_results) {
-        brute_force_ids.push_back(result.first);
+        if (distance < brute_force_results.second) {
+            brute_force_results.first = i;
+            brute_force_results.second = distance;
+        }
     }
 
-    std::vector<int> hnsw_ids;
-    for (const auto& result : hnsw_results) {
-        hnsw_ids.push_back(result.first);
-    }
-    
-    return calculateIntersection(hnsw_ids, brute_force_ids, k);
+   return brute_force_results.first;
 }
 
 std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vector<float> query_feature_vec, int factor, std::vector<std::pair<int, float>>& candidates) {
@@ -208,24 +191,24 @@ void build_hnsw(HNSW& hnsw, int input_size, ValueType2DVector<float>& datamatrix
 
 int main(int argc, char** argv) {
 
-    if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M> <query_input_filepath>" << std::endl;
+    if (argc < 9) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <num_of_levels> <l> <M> <num_threads> <query_input_filepath>" << std::endl;
         return 1;
     }
     
     std::string input_filepath = argv[1];
     int input_size = std::stoi(argv[2]);
     int dimension = std::stoi(argv[3]);
-    int k = std::stoi(argv[4]);
-    int num_of_levels = std::stoi(argv[5]);
-    int l = std::stoi(argv[6]);
-    int M = std::stoi(argv[7]);
+    int num_of_levels = std::stoi(argv[4]);
+    int l = std::stoi(argv[5]);
+    int M = std::stoi(argv[6]);
+    int p = std::stoi(argv[7]);
     std::string query_input_filepath = argv[8];
 
     ValueType2DVector<float> datamatrix;
     read_txt(input_filepath, &datamatrix);
 
-    auto hnsw_build_start = std::chrono::high_resolution_clock::now();
+    double hnsw_build_start = omp_get_wtime();
     
     HNSW hnsw;
     hnsw.max_level = num_of_levels - 1;
@@ -233,34 +216,40 @@ int main(int argc, char** argv) {
 
     build_hnsw(hnsw, input_size, datamatrix, l, M);
 
-    auto hnsw_build_end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> hnsw_build_duration = hnsw_build_end - hnsw_build_start;
-    std::cout << "Time taken to build HNSW index: " << hnsw_build_duration.count() << " seconds\n";
+    double hnsw_build_end = omp_get_wtime();
+   double hnsw_build_duration = hnsw_build_end - hnsw_build_start;
+    std::cout << "Time taken to build HNSW index: " << hnsw_build_duration << " seconds\n";
     
     ValueType2DVector<float> query_datamatrix;
     read_txt(query_input_filepath, &query_datamatrix);
 
-    auto search_start = std::chrono::high_resolution_clock::now();
+    double search_start = omp_get_wtime();
     
-    std::vector<std::vector<std::pair<int, float>>> all_results;
-    for (const auto& query : query_datamatrix) {
-        std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query, k, l);
-        all_results.push_back(results);
-    }
-
-    auto search_end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> search_duration = search_end - search_start;
-    std::cout << "Time taken for search: " << search_duration.count() << " seconds\n";
-
-    std::vector<float> recalls;
-    for (int i = 0; i < query_datamatrix.size(); ++i) {
+    int query_input_size = query_datamatrix.size();
+    std::vector<int> hnsw_ids(query_input_size);
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < query_input_size; ++i) {
         std::vector<float> query = query_datamatrix[i];
-        std::vector<std::pair<int, float>> results = all_results[i];
-        float recall = calculate_recall(results, query, datamatrix, k);
-        recalls.push_back(recall);
+        std::vector<std::pair<int, float>> results = query_hnsw(hnsw, query, 1, l);
+        hnsw_ids[i] = results[0].first;
     }
 
-    float mean_recall = std::accumulate(recalls.begin(), recalls.end(), 0.0) / recalls.size();
+    double search_end = omp_get_wtime();
+    double search_duration = search_end - search_start;
+    std::cout << "Time taken for search: " << search_duration << " seconds\n";
+
+    float correct = 0;
+    #pragma omp parallel for num_threads(p) reduction(+:correct)
+    for (int i = 0; i < query_input_size; ++i) {
+        std::vector<float> query = query_datamatrix[i];
+        int hnsw_id = hnsw_ids[i];
+        int brute_force_id = query_brute_force(query, datamatrix);
+        if (brute_force_id == hnsw_id) {
+            correct++;
+        }
+    }
+
+    float mean_recall = correct / query_input_size;
     std::cout << "Mean Recall: " << mean_recall << std::endl;
 
     return 0;

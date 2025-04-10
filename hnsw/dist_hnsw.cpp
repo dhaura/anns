@@ -10,6 +10,7 @@
 #include <numeric>
 #include <algorithm>
 #include <random>
+#include <omp.h>
 #include <mpi.h>
 
 template <typename VALUE_TYPE>
@@ -30,7 +31,7 @@ struct HNSW {
     std::map<int, Node> nodes;
 };
 
-static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
+void read_txt(std::string filename, ValueType2DVector<float>* datamatrix) {
     
     std::ifstream infile(filename); // Open the file for reading.
     std::vector<std::vector<float>> data; // Vector to hold the loaded data.
@@ -42,12 +43,9 @@ static void read_txt(std::string filename, ValueType2DVector<float>* datamatrix)
             std::istringstream iss(line);
             float value;
 
-            // Read each value (label followed by features).
             while (iss >> value) {
                 row.push_back(value);
             }
-
-            // Add the row (data vector) to the data vector.
             data.push_back(row);
         }
         datamatrix->resize(data.size());
@@ -92,38 +90,21 @@ float euclidean_distance(const std::vector<float>& a, const std::vector<float>& 
     return std::sqrt(sum);
 }
 
-float calculateIntersection(const std::vector<int>& hnsw_ids, const std::vector<int>& brute_force_ids, int k) {
-    
-    std::unordered_set<int> hnsw_set(hnsw_ids.begin(), hnsw_ids.end());
+int query_brute_force(std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix) {
 
-    int intersection_count = std::accumulate(brute_force_ids.begin(), brute_force_ids.end(), 0, 
-        [&hnsw_set](int count, int id) {
-            return count + (hnsw_set.count(id) > 0);
-        });
+    std::pair<int, float> brute_force_results;
+    brute_force_results.first = -1;
+    brute_force_results.second = std::numeric_limits<float>::max();
 
-    return static_cast<float>(intersection_count) / k;
-}
-
-float calculate_recall(std::vector<std::pair<int, float>>& hnsw_results, std::vector<float>& query_vector, ValueType2DVector<float>& datamatrix, int k) {
-
-    std::vector<std::pair<int, float>> brute_force_results;
     for (int i = 0; i < datamatrix.size(); ++i) {
         float distance = euclidean_distance(query_vector, datamatrix[i]);
-        brute_force_results.push_back(std::make_pair(i, distance));
-    }
-    brute_force_results = find_top_K(brute_force_results, k);
-
-    std::vector<int> brute_force_ids;
-    for (const auto& result : brute_force_results) {
-        brute_force_ids.push_back(result.first);
+        if (distance < brute_force_results.second) {
+            brute_force_results.first = i;
+            brute_force_results.second = distance;
+        }
     }
 
-    std::vector<int> hnsw_ids;
-    for (const auto& result : hnsw_results) {
-        hnsw_ids.push_back(result.first);
-    }
-    
-    return calculateIntersection(hnsw_ids, brute_force_ids, k);
+   return brute_force_results.first;
 }
 
 std::vector<std::pair<int, float>> search_level(HNSW& hnsw, int level, std::vector<float> query_feature_vec, int factor, std::vector<std::pair<int, float>>& candidates) {
@@ -217,19 +198,25 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <k> <num_of_levels> <l> <M> <query_inpuy_file_path>" << std::endl;
+    if (argc < 10) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <num_of_levels> <l> <M> <num_threads> <randomize_input> <query_inpuy_file_path>" << std::endl;
         return 1;
     }
     
+    // Parse command line arguments into variables.
     std::string input_filepath = argv[1];
     int input_size = std::stoi(argv[2]);
     int dimension = std::stoi(argv[3]);
-    int k = std::stoi(argv[4]);
-    int num_of_levels = std::stoi(argv[5]);
-    int l = std::stoi(argv[6]);
-    int M = std::stoi(argv[7]);
-    std::string query_input_filepath = argv[8];
+    int num_of_levels = std::stoi(argv[4]);
+    int l = std::stoi(argv[5]);
+    int M = std::stoi(argv[6]);
+    int p = std::stoi(argv[7]);
+    bool randomize_input = std::stoi(argv[8]);
+    std::string query_input_filepath = argv[9];
+    
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_start = MPI_Wtime();
 
     ValueType2DVector<float> datamatrix;
     ValueType2DVector<float> local_datamatrix;
@@ -241,15 +228,21 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         read_txt(input_filepath, &datamatrix);
 
+        // Randomize input data if specified.
+        if (randomize_input) {
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(datamatrix.begin(), datamatrix.end(), g);
+        }
+
+        // Flatten the data matrix for sending.
         local_datamatrix.resize(local_input_size);
         for (int i = 0; i < local_input_size; ++i) {
             local_datamatrix[i] = datamatrix[i];
         }
-
-        // std::random_device rd;
-        // std::mt19937 g(rd());
-        // std::shuffle(datamatrix.begin(), datamatrix.end(), g);
         
+        // Send data to other processes.
+        #pragma omp parallel for num_threads(p)
         for (int i = 1; i < world_size; ++i) {
             int start_index = i * local_input_size;
             int end_index = (i + 1) * local_input_size;
@@ -268,11 +261,14 @@ int main(int argc, char** argv) {
     } else {
         int num_elements = dimension * local_input_size;
         
+        // Receiving data from process 0.
         std::vector<float> flattened_data_recv(num_elements);
         MPI_Recv(flattened_data_recv.data(), num_elements, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
+        // Reshape the flattened data into local_datamatrix.
         local_datamatrix.resize(local_input_size);
         int index = 0;
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i) {
             local_datamatrix[i].assign(flattened_data_recv.begin() + index, flattened_data_recv.begin() + index + dimension);
             index += dimension;
@@ -282,32 +278,62 @@ int main(int argc, char** argv) {
     HNSW hnsw;
     hnsw.max_level = num_of_levels - 1;
 
+    // Build hnsw index.
     build_hnsw(hnsw, input_size, local_datamatrix, l, M, rank, world_size);
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_end = MPI_Wtime();
+    double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
+    double hnsw_build_duration;
+    MPI_Reduce(&local_hnsw_build_duration, &hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+        std::cout << "Time taken to build HNSW index: " << hnsw_build_duration << " seconds\n";
+    }
 
     ValueType2DVector<float> query_datamatrix;
     read_txt(query_input_filepath, &query_datamatrix);
 
-    std::vector<float> recalls;
+    MPI_Barrier(MPI_COMM_WORLD);
+    double search_start = MPI_Wtime();
 
-    for (auto& query : query_datamatrix) {
-        std::vector<std::pair<int, float>> local_results = query_hnsw(hnsw, query, k, l);
-        std::vector<std::pair<int, float>> results(k * world_size);
-        MPI_Gather(local_results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, results.data(), k * sizeof(std::pair<int, float>), MPI_BYTE, 0, MPI_COMM_WORLD);
-        
-        if (rank == 0) {
-            std::vector<std::pair<int, float>> final_results = find_top_K(results, k);
-            float recall = calculate_recall(final_results, query, datamatrix, k);
-            recalls.push_back(recall);
-            std::cout << "Recall: " << recall << std::endl;
-        }
+    int query_input_size = query_datamatrix.size();
+    struct {
+        float value;
+        int id;
+    } local_results[query_input_size], global_results[query_input_size];
+
+    // Find nearest neighbors of the queries using hnsw index.
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < query_input_size; ++i) {
+        std::vector<float> query = query_datamatrix[i];
+        std::vector<std::pair<int, float>> result = query_hnsw(hnsw, query, 1, l);
+        local_results[i].value = result[0].second;
+        local_results[i].id = result[0].first;
     }
+
+    // Reduce to find min distance and corresponding label across all processes.
+    MPI_Reduce(local_results, global_results, query_input_size, MPI_FLOAT_INT, MPI_MINLOC, 0, MPI_COMM_WORLD);
+
+    double search_end = MPI_Wtime();
+    double local_search_duration = search_end - search_start;
+    double search_duration;
+    MPI_Reduce(&local_search_duration, &search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     
     if (rank == 0) {
-        float mean_recall = std::accumulate(recalls.begin(), recalls.end(), 0.0) / recalls.size();
-        std::cout << "Mean Recall: " << mean_recall << std::endl;
-        std::cout << euclidean_distance({5.9, 3.0, 5.1, 1.8}, {0.9, 0.2, 1.0, 4.5}) << std::endl;
+        std::cout << "Time taken for search: " << search_duration << " seconds\n";
+
+        // Calculate recall.
+        float correct = 0;
+        #pragma omp parallel for num_threads(p) reduction(+:correct)
+        for (int i = 0; i < query_input_size; ++i) {
+            int hnsw_id = global_results[i].id;
+            std::vector<float> query = query_datamatrix[i];
+            int brute_force_id = query_brute_force(query, datamatrix);
+            if (brute_force_id == hnsw_id) {
+                correct++;
+            }
+        }
+        float mean_recall = correct / query_input_size;
+        std::cout << "Recall: " << mean_recall << std::endl;
     }
     
     MPI_Finalize();
