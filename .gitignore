@@ -33,3 +33,6 @@
 
 # VS Code settings
 .vscode/
+
+# Big Datasets
+data/glove

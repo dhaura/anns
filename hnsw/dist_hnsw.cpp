@@ -237,12 +237,12 @@ int main(int argc, char** argv) {
 
         // Flatten the data matrix for sending.
         local_datamatrix.resize(local_input_size);
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i) {
             local_datamatrix[i] = datamatrix[i];
         }
         
         // Send data to other processes.
-        #pragma omp parallel for num_threads(p)
         for (int i = 1; i < world_size; ++i) {
             int start_index = i * local_input_size;
             int end_index = (i + 1) * local_input_size;
