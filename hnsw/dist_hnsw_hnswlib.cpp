@@ -57,9 +57,6 @@ int main(int argc, char** argv) {
     std::string query_input_filepath = argv[8];
     int query_input_size = std::stoi(argv[9]);
 
-    MPI_Barrier(MPI_COMM_WORLD);
-    double hnsw_build_start = MPI_Wtime();
-
     float* data = new float[input_size * dimension];
 
     int local_input_size = input_size / world_size;
@@ -70,7 +67,12 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         read_txt(input_filepath, data, input_size, dimension);
-        
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_start = MPI_Wtime();
+
+    if (rank == 0) {       
         // Randomize input data if specified.
         if (randomize_input) {
             std::random_device rd;

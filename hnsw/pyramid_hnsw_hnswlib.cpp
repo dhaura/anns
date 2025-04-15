@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <numeric>
 #include <mpi.h>
+#include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
 void read_txt(std::string filename, float* data, int input_size, int dimension) {
@@ -96,7 +97,12 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         data = new float[input_size * dimension];
         read_txt(input_filepath, data, input_size, dimension);
+    }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_start = MPI_Wtime();
+
+    if (rank == 0) {
         cv::Mat sampled_data;
         sample_input(data, input_size, dimension, sample_size, sampled_data);
 
@@ -113,6 +119,7 @@ int main(int argc, char** argv) {
         m_centers = centers.ptr<float>();
         meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, k, M, ef_construction);
 
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < k; i++) {
             meta_hnsw->addPoint(m_centers + i * dimension, i);
         }
@@ -133,6 +140,7 @@ int main(int argc, char** argv) {
             std::vector<int>& data_ids_to_send_i = data_ids_to_send[i];
             float** data_ptrs = data_to_send[i].data();
             float* data_to_send_i = new float[data_size_to_send_i * dimension];
+            #pragma omp parallel for num_threads(p)
             for (int j = 0; j < data_size_to_send_i; ++j) {
                 std::memcpy(data_to_send_i + j * dimension, data_ptrs[j], dimension * sizeof(float));
             }
@@ -147,6 +155,7 @@ int main(int argc, char** argv) {
         local_data_ids = data_ids_to_send[0];
         local_data = new float[local_input_size * dimension];
         float** data_ptrs = data_to_send[0].data();
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i) {
             std::memcpy(local_data + i * dimension, data_ptrs[i], dimension * sizeof(float));
         }
@@ -166,15 +175,27 @@ int main(int argc, char** argv) {
     hnswlib::HierarchicalNSW<float>* local_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
 
     // Add data to hnsw index.
+    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++) {
         local_hnsw->addPoint(local_data + i * dimension, local_data_ids[i]);
     }
     
+    double hnsw_build_end = MPI_Wtime();
+    double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
+    double global_hnsw_build_duration;
+    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+        std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
+    }
+
     int local_query_input_size;
     std::vector<int> local_query_indices;
 
     float* query_data = new float[query_input_size * dimension];
     read_txt(query_input_filepath, query_data, query_input_size, dimension);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double search_start = MPI_Wtime();
 
     if (rank == 0) {
         std::vector<std::vector<int>> query_indices(world_size);
@@ -222,6 +243,7 @@ int main(int argc, char** argv) {
 
     if (local_query_input_size > 0) {
         // Find nearest neighbors of the queries using HNSW.
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_query_input_size; ++i) {
             int query_index = local_query_indices[i];
             float* query = query_data + query_index * dimension;
@@ -236,7 +258,14 @@ int main(int argc, char** argv) {
 
     // Gather results from all processes.
     MPI_Reduce(local_results, global_results, query_input_size, MPI_FLOAT_INT, MPI_MINLOC, 0, MPI_COMM_WORLD);
+
+    double search_end = MPI_Wtime();
+    double local_search_duration = search_end - search_start;
+    double global_search_duration;
+    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
+        std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         hnswlib::BruteforceSearch<float>* alg_brute = new hnswlib::BruteforceSearch<float>(&space, input_size);
         for (int i = 0; i < input_size; i++) {
@@ -244,10 +273,11 @@ int main(int argc, char** argv) {
         }
 
         double correct = 0;
+        #pragma omp parallel for num_threads(p) reduction(+:correct)
         for (int i = 0; i < query_input_size; i++) {
             std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_brute->searchKnn(query_data + i * dimension, 1);
             int brute_force_id = result.top().second;
-            std::cout << "Query " << i << ": HNSW ID: " << global_results[i].id << " HNSW distance: " << global_results[i].value << " Brute-force ID: " << brute_force_id << " Brute-force distance: " << result.top().first << std::endl;
+            // std::cout << "Query " << i << ": HNSW ID: " << global_results[i].id << " HNSW distance: " << global_results[i].value << " Brute-force ID: " << brute_force_id << " Brute-force distance: " << result.top().first << std::endl;
             if (global_results[i].id == brute_force_id) {
                 correct++;
             }
