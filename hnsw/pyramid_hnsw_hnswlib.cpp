@@ -58,8 +58,8 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 11) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
+    if (argc < 12) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <M> <ef_construction> <branching_factor> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
         return 1;
     }
     
@@ -70,16 +70,16 @@ int main(int argc, char** argv) {
     int sample_size = std::stoi(argv[4]);
     int M = std::stoi(argv[5]);
     int ef_construction = std::stoi(argv[6]);
-    int p = std::stoi(argv[7]);
-    bool randomize_input = std::stoi(argv[8]);
-    std::string query_input_filepath = argv[9];
-    int query_input_size = std::stoi(argv[10]);
+    int branching_factor = std::stoi(argv[7]);
+    int p = std::stoi(argv[8]);
+    bool randomize_input = std::stoi(argv[9]);
+    std::string query_input_filepath = argv[10];
+    int query_input_size = std::stoi(argv[11]);
 
-    float* data = new float[input_size * dimension];
-    float* local_data;
+    float* data;
     int local_input_size;
-
-    read_txt(input_filepath, data, input_size, dimension);
+    float* local_data;
+    std::vector<int> local_data_ids(world_size);
 
     // Number of clusters
     int k;
@@ -94,6 +94,9 @@ int main(int argc, char** argv) {
     hnswlib::HierarchicalNSW<float>* meta_hnsw;
 
     if (rank == 0) {
+        data = new float[input_size * dimension];
+        read_txt(input_filepath, data, input_size, dimension);
+
         cv::Mat sampled_data;
         sample_input(data, input_size, dimension, sample_size, sampled_data);
 
@@ -114,35 +117,38 @@ int main(int argc, char** argv) {
             meta_hnsw->addPoint(m_centers + i * dimension, i);
         }
 
-        // TODO: divide m centers into w groups -> w = world_size
+        // TODO: divide m centers into w groups.
         std::vector<std::vector<float*>> data_to_send(world_size);
+        std::vector<std::vector<int>> data_ids_to_send(world_size);
         for (int i = 0; i < input_size; i++) {
             std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(data + i * dimension, 1);
-            float distance = result.top().first;
             int label_id = result.top().second;
 
+            data_ids_to_send[label_id].push_back(i);
             data_to_send[label_id].push_back(data + i * dimension);
-        }
-
-        // Allocate local data for rank 0.
-        local_input_size = data_to_send[0].size();
-        local_data = new float[local_input_size * dimension];
-        float** data_ptrs = data_to_send[0].data();
-        for (int i = 0; i < local_input_size; ++i) {
-            std::memcpy(local_data + i * dimension, data_ptrs[i], dimension * sizeof(float));
         }
 
         for (int i = 1; i < world_size; i++) {
             int data_size_to_send_i = data_to_send[i].size();
+            std::vector<int>& data_ids_to_send_i = data_ids_to_send[i];
             float** data_ptrs = data_to_send[i].data();
             float* data_to_send_i = new float[data_size_to_send_i * dimension];
-
             for (int j = 0; j < data_size_to_send_i; ++j) {
                 std::memcpy(data_to_send_i + j * dimension, data_ptrs[j], dimension * sizeof(float));
             }
 
             MPI_Send(&data_size_to_send_i, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
             MPI_Send(data_to_send_i, data_size_to_send_i * dimension, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
+            MPI_Send(data_ids_to_send_i.data(), data_size_to_send_i, MPI_INT, i, 0, MPI_COMM_WORLD);
+        }
+
+        // Allocate local data for rank 0.
+        local_input_size = data_to_send[0].size();
+        local_data_ids = data_ids_to_send[0];
+        local_data = new float[local_input_size * dimension];
+        float** data_ptrs = data_to_send[0].data();
+        for (int i = 0; i < local_input_size; ++i) {
+            std::memcpy(local_data + i * dimension, data_ptrs[i], dimension * sizeof(float));
         }
     } else {
         // Receiving data from process 0.
@@ -150,10 +156,10 @@ int main(int argc, char** argv) {
 
         local_data = new float[local_input_size * dimension];
         MPI_Recv(local_data, local_input_size * dimension, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    }
 
-    int label_start = 0;
-    MPI_Exscan(&local_input_size, &label_start, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        local_data_ids.resize(local_input_size);
+        MPI_Recv(local_data_ids.data(), local_input_size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
 
     // Initiate hnsw index.
     hnswlib::L2Space space(dimension);
@@ -161,88 +167,94 @@ int main(int argc, char** argv) {
 
     // Add data to hnsw index.
     for (int i = 0; i < local_input_size; i++) {
-        local_hnsw->addPoint(local_data + i * dimension, label_start + i);
+        local_hnsw->addPoint(local_data + i * dimension, local_data_ids[i]);
+    }
+    
+    int local_query_input_size;
+    std::vector<int> local_query_indices;
+
+    float* query_data = new float[query_input_size * dimension];
+    read_txt(query_input_filepath, query_data, query_input_size, dimension);
+
+    if (rank == 0) {
+        std::vector<std::vector<int>> query_indices(world_size);
+        for (int i = 0; i < query_input_size; ++i) {
+            float* query = query_data + i * dimension;            
+            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(query, branching_factor);
+        
+            while (result.size() > 0) {
+                int eligible_node = result.top().second;
+                result.pop();
+                
+                query_indices[eligible_node].push_back(i);
+            }
+        }
+        for (int i = 1; i < world_size; ++i) {
+            int local_query_input_size = query_indices[i].size();
+            MPI_Send(&local_query_input_size, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+            if (local_query_input_size > 0) {
+                MPI_Send(query_indices[i].data(), local_query_input_size, MPI_INT, i, 0, MPI_COMM_WORLD);
+            }
+        }
+
+        local_query_input_size = query_indices[0].size();
+        if (local_query_input_size > 0) {
+            local_query_indices.resize(local_query_input_size);
+            std::copy(query_indices[0].begin(), query_indices[0].end(), local_query_indices.begin());
+        }
+    } else {
+        MPI_Recv(&local_query_input_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (local_query_input_size > 0) {
+            local_query_indices.resize(local_query_input_size);
+            MPI_Recv(local_query_indices.data(), local_query_input_size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
     }
 
-    int local_query_size = 0;
-    float* local_query_data = nullptr;
-    if (rank == 0) {
-        float* query_data = new float[query_input_size * dimension];
-        read_txt(query_input_filepath, query_data, query_input_size, dimension);
+    struct {
+        float value;
+        int id;
+    } local_results[query_input_size], global_results[query_input_size];
+    
+    for (int i = 0; i < query_input_size; ++i) {
+        local_results[i].id = -1;
+        local_results[i].value = std::numeric_limits<float>::max();
+    }
 
-        std::vector<std::vector<float*>> query_to_send(world_size);
-        for (int i = 0; i < query_input_size; ++i) {
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(query_data + i * dimension, 1);
+    if (local_query_input_size > 0) {
+        // Find nearest neighbors of the queries using HNSW.
+        for (int i = 0; i < local_query_input_size; ++i) {
+            int query_index = local_query_indices[i];
+            float* query = query_data + query_index * dimension;
+            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = local_hnsw->searchKnn(query, 1);
             float distance = result.top().first;
             int label_id = result.top().second;
-
-            query_to_send[label_id].push_back(query_data + i * dimension);
-        }
-
-        // Allocate local data for rank 0.
-        local_query_size = query_to_send[0].size();
-        local_query_data = new float[local_query_size * dimension];
-        float** query_ptrs = query_to_send[0].data();
-        for (int i = 0; i < local_query_size; ++i) {
-            std::memcpy(local_query_data + i * dimension, query_ptrs[i], dimension * sizeof(float));
-        }
-
-
-        for (int i = 1; i < world_size; i++) {
-            int query_size_to_send_i = query_to_send[i].size();
-            float** query_ptrs = query_to_send[i].data();
-            float* query_to_send_i = new float[query_size_to_send_i * dimension];
-
-            for (int j = 0; j < query_size_to_send_i; ++j) {
-                std::memcpy(query_to_send_i + j * dimension, query_ptrs[j], dimension * sizeof(float));
-            }
-
-            MPI_Send(&query_size_to_send_i, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(query_to_send_i, query_size_to_send_i * dimension, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
-        }
-
-    } else {
-        // Receiving data from process 0.
-        MPI_Recv(&local_query_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-        local_query_data = new float[local_query_size * dimension];
-        MPI_Recv(local_query_data, local_query_size * dimension, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    }
-
-    // Print received query data
-    std::vector<int> local_query_results(local_query_size);
-    for (int i = 0; i < local_query_size; ++i) {
-        float* query = local_query_data + i * dimension;
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = local_hnsw->searchKnn(query, 1);
-        float distance = result.top().first;
-        int label_id = result.top().second;
-        local_query_results[i] = label_id;
-    }
-
-    hnswlib::BruteforceSearch<float>* alg_brute = new hnswlib::BruteforceSearch<float>(&space, input_size);
-    for (int i = 0; i < input_size; i++) {
-        alg_brute->addPoint(data + i * dimension, i);
-    }
-
-    float correct = 0;
-    for (int i = 0; i < local_query_size; i++) {
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_brute->searchKnn(local_query_data + i * dimension, 1);
-        int brute_force_id = result.top().second;
-        if (local_query_results[i] == brute_force_id) {
-            correct++;
+    
+            local_results[query_index].value = distance;
+            local_results[query_index].id = label_id;
         }
     }
 
+    // Gather results from all processes.
+    MPI_Reduce(local_results, global_results, query_input_size, MPI_FLOAT_INT, MPI_MINLOC, 0, MPI_COMM_WORLD);
     if (rank == 0) {
-        for (int i = 1; i < world_size; i++) {
-            float correct_i;
-            MPI_Recv(&correct_i, 1, MPI_FLOAT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            correct += correct_i;
+
+        hnswlib::BruteforceSearch<float>* alg_brute = new hnswlib::BruteforceSearch<float>(&space, input_size);
+        for (int i = 0; i < input_size; i++) {
+            alg_brute->addPoint(data + i * dimension, i);
         }
+
+        double correct = 0;
+        for (int i = 0; i < query_input_size; i++) {
+            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_brute->searchKnn(query_data + i * dimension, 1);
+            int brute_force_id = result.top().second;
+            std::cout << "Query " << i << ": HNSW ID: " << global_results[i].id << " HNSW distance: " << global_results[i].value << " Brute-force ID: " << brute_force_id << " Brute-force distance: " << result.top().first << std::endl;
+            if (global_results[i].id == brute_force_id) {
+                correct++;
+            }
+        }
+
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << std::endl;
-    } else {
-        MPI_Send(&correct, 1, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
     }
 
     MPI_Finalize();

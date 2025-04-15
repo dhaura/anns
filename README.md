@@ -52,3 +52,14 @@ mpirun -n <num_of_nodes> ./dist_hnsw_hnswlib.out <input_filepath> <input_size> <
 ```bash
 mpirun -n 4 ./dist_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 16 200 2 0 ../data/iris_dataset/query/iris_query_points_1.txt 11
 ```
+
+### 3. Distributed HNSW (Pyramid Approach)
+#### 2.1 hnswlib
+1. Compile the code.
+```bash
+mpic++ pyramid_hnsw_hnswlib.cpp -o pyramid_hnsw_hnswlib.out -fopenmp `pkg-config --cflags --libs opencv4`
+```
+2. Run the code.
+```bash
+mpirun -n 4 ./pyramid_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 30 16 200 2 1 0 ../data/iris_dataset/query/iris_query_points_1.txt 11
+```
