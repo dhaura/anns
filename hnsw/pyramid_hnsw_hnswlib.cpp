@@ -33,10 +33,9 @@ void read_txt(std::string filename, float* data, int input_size, int dimension) 
 }
 
 void sample_input(float* datamatrix, int input_size, int dim,
-                   int num_samples, cv::Mat& sampled_data) {
+    int num_samples, cv::Mat& sampled_data) {
 
     srand(time(0));
-
     sampled_data = cv::Mat(num_samples, dim, CV_32F);
 
     std::vector<int> indices(input_size);
@@ -51,6 +50,80 @@ void sample_input(float* datamatrix, int input_size, int dim,
     }
 }
 
+float euclideanDistance(const cv::Mat& centers, int i, int j) {
+    
+    float dist = 0.0f;
+    for (int d = 0; d < centers.cols; ++d) {
+        float diff = centers.at<float>(i, d) - centers.at<float>(j, d);
+        dist += diff * diff;
+    }
+    return std::sqrt(dist);
+}
+
+void greedy_grouping(const cv::Mat& centers, int num_groups,
+    int k_neighbors, std::vector<int>& group_assignment, int p) {
+    
+    int m = centers.rows;
+    group_assignment.assign(m, -1);
+
+    std::vector<std::vector<int>> knn_graph(m);
+
+    // Step 1: Build k-NN graph
+    for (int i = 0; i < m; ++i) {
+        std::priority_queue<std::pair<float, int>> pq;
+        for (int j = 0; j < m; ++j) {
+            if (i == j) continue;
+            float dist = 0.0f;
+            for (int d = 0; d < centers.cols; ++d) {
+                float diff = centers.at<float>(i, d) - centers.at<float>(j, d);
+                dist += diff * diff;
+            }
+            pq.push({dist, j});
+            if ((int)pq.size() > k_neighbors)
+                pq.pop();
+        }
+
+        while (!pq.empty()) {
+            knn_graph[i].push_back(pq.top().second);
+            pq.pop();
+        }
+    }
+
+    // Step 2: Greedy balanced assignment
+    std::vector<int> group_sizes(num_groups, 0);
+    int max_group_size = (m + num_groups - 1) / num_groups;
+
+    for (int i = 0; i < std::min(num_groups, m); ++i) {
+        group_assignment[i] = i;
+        group_sizes[i]++;
+    }
+
+    #pragma omp parallel for num_threads(p)
+    for (int i = num_groups; i < m; ++i) {
+        std::vector<int> scores(num_groups, 0);
+        for (int neighbor : knn_graph[i]) {
+            int g = group_assignment[neighbor];
+            if (g != -1 && group_sizes[g] < max_group_size)
+                scores[g]++;
+        }
+
+        int best_group = -1, max_score = -1;
+        for (int g = 0; g < num_groups; ++g) {
+            if (group_sizes[g] < max_group_size && scores[g] > max_score) {
+                max_score = scores[g];
+                best_group = g;
+            }
+        }
+
+        if (best_group == -1) {
+            best_group = std::min_element(group_sizes.begin(), group_sizes.end()) - group_sizes.begin();
+        }
+
+        group_assignment[i] = best_group;
+        group_sizes[best_group]++;
+    }
+}
+
 int main(int argc, char** argv) {
 
     MPI_Init(&argc, &argv);
@@ -59,8 +132,8 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 12) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <M> <ef_construction> <branching_factor> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
+    if (argc < 13) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
         return 1;
     }
     
@@ -69,30 +142,24 @@ int main(int argc, char** argv) {
     int input_size = std::stoi(argv[2]);
     int dimension = std::stoi(argv[3]);
     int sample_size = std::stoi(argv[4]);
-    int M = std::stoi(argv[5]);
-    int ef_construction = std::stoi(argv[6]);
-    int branching_factor = std::stoi(argv[7]);
-    int p = std::stoi(argv[8]);
-    bool randomize_input = std::stoi(argv[9]);
-    std::string query_input_filepath = argv[10];
-    int query_input_size = std::stoi(argv[11]);
+    int m = std::stoi(argv[5]);
+    int k = std::stoi(argv[6]);
+    int M = std::stoi(argv[7]);
+    int ef_construction = std::stoi(argv[8]);
+    int p = std::stoi(argv[9]);
+    bool randomize_input = std::stoi(argv[10]);
+    std::string query_input_filepath = argv[11];
+    int query_input_size = std::stoi(argv[12]);
 
     float* data;
     int local_input_size;
     float* local_data;
     std::vector<int> local_data_ids(world_size);
 
-    // Number of clusters
-    int k;
-
-    // Output labels and centers
-    cv::Mat labels;
-    cv::Mat centers;
-
-    float* m_centers;
-
     hnswlib::L2Space meta_space(dimension);
     hnswlib::HierarchicalNSW<float>* meta_hnsw;
+
+    std::vector<int> center_to_group(m);
 
     if (rank == 0) {
         data = new float[input_size * dimension];
@@ -106,7 +173,14 @@ int main(int argc, char** argv) {
         cv::Mat sampled_data;
         sample_input(data, input_size, dimension, sample_size, sampled_data);
 
-        k = world_size;
+        // Number of groups.
+        int w = world_size;
+
+        // Output labels and centers.
+        cv::Mat labels;
+        cv::Mat centers;
+
+        float* m_centers;
 
         // kmeans flags
         cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 100, 0.1);
@@ -114,25 +188,26 @@ int main(int argc, char** argv) {
         int flags = cv::KMEANS_PP_CENTERS;
 
         // Run kmeans
-        cv::kmeans(sampled_data, k, labels, criteria, attempts, flags, centers);
+        cv::kmeans(sampled_data, m, labels, criteria, attempts, flags, centers);
 
-        m_centers = centers.ptr<float>();
-        meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, k, M, ef_construction);
+        meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, m, M, ef_construction);
 
         #pragma omp parallel for num_threads(p)
         for (int i = 0; i < k; i++) {
-            meta_hnsw->addPoint(m_centers + i * dimension, i);
+            meta_hnsw->addPoint(centers.ptr<float>(i), i);
         }
 
-        // TODO: divide m centers into w groups.
+        greedy_grouping(centers, w, 5, center_to_group, p);
+
         std::vector<std::vector<float*>> data_to_send(world_size);
         std::vector<std::vector<int>> data_ids_to_send(world_size);
         for (int i = 0; i < input_size; i++) {
             std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(data + i * dimension, 1);
-            int label_id = result.top().second;
+            int center = result.top().second;
+            int group = center_to_group[center];
 
-            data_ids_to_send[label_id].push_back(i);
-            data_to_send[label_id].push_back(data + i * dimension);
+            data_ids_to_send[group].push_back(i);
+            data_to_send[group].push_back(data + i * dimension);
         }
 
         for (int i = 1; i < world_size; i++) {
@@ -206,14 +281,20 @@ int main(int argc, char** argv) {
         std::vector<std::vector<float*>> query_data_to_send(world_size);
         for (int i = 0; i < query_input_size; ++i) {
             float* query = query_data + i * dimension;            
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(query, branching_factor);
+            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(query, k);
         
+            std::vector<int> visited_groups;
             while (result.size() > 0) {
-                int eligible_node = result.top().second;
+                int center = result.top().second;
                 result.pop();
                 
-                query_indices[eligible_node].push_back(i);
-                query_data_to_send[eligible_node].push_back(query);
+                int group = center_to_group[center];
+                if (std::find(visited_groups.begin(), visited_groups.end(), group) != visited_groups.end()) {
+                    continue;
+                }
+
+                query_indices[group].push_back(i);
+                query_data_to_send[group].push_back(query);   
             }
         }
         for (int i = 1; i < world_size; ++i) {

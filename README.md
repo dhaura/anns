@@ -61,5 +61,5 @@ mpic++ pyramid_hnsw_hnswlib.cpp -o pyramid_hnsw_hnswlib.out -fopenmp `pkg-config
 ```
 2. Run the code.
 ```bash
-mpirun -n 4 ./pyramid_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 30 16 200 2 1 0 ../data/iris_dataset/query/iris_query_points_1.txt 11
+mpirun -n 4 ./pyramid_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 30 12 2 16 200 1 0 ../data/iris_dataset/query/iris_query_points_1.txt 11
 ```
