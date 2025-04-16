@@ -217,18 +217,18 @@ int main(int argc, char** argv) {
             }
         }
         for (int i = 1; i < world_size; ++i) {
-            int local_query_input_size = query_indices[i].size();
-            MPI_Send(&local_query_input_size, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            if (local_query_input_size > 0) {
+            int query_data_size_to_send_i = query_indices[i].size();
+            MPI_Send(&query_data_size_to_send_i, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+            if (query_data_size_to_send_i > 0) {
                 float** query_ptrs = query_data_to_send[i].data();
-                float* local_query_data = new float[local_query_input_size * dimension];
+                float* query_data_to_send_i = new float[query_data_size_to_send_i * dimension];
                 #pragma omp parallel for num_threads(p)
-                for (int j = 0; j < local_query_input_size; ++j) {
-                    std::memcpy(local_query_data + j * dimension, query_ptrs[j], dimension * sizeof(float));
+                for (int j = 0; j < query_data_size_to_send_i; ++j) {
+                    std::memcpy(query_data_to_send_i + j * dimension, query_ptrs[j], dimension * sizeof(float));
                 }
 
-                MPI_Send(query_indices[i].data(), local_query_input_size, MPI_INT, i, 0, MPI_COMM_WORLD);
-                MPI_Send(local_query_data, local_query_input_size * dimension, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
+                MPI_Send(query_indices[i].data(), query_data_size_to_send_i, MPI_INT, i, 0, MPI_COMM_WORLD);
+                MPI_Send(query_data_to_send_i, query_data_size_to_send_i * dimension, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
             }
         }
 
