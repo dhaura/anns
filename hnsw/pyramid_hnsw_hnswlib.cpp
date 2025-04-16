@@ -188,17 +188,22 @@ int main(int argc, char** argv) {
         std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
     }
 
-    int local_query_input_size;
-    std::vector<int> local_query_indices;
+    float* query_data; 
+    if (rank == 0) {
+        query_data = new float[query_input_size * dimension];
+        read_txt(query_input_filepath, query_data, query_input_size, dimension);
+    }
 
-    float* query_data = new float[query_input_size * dimension];
-    read_txt(query_input_filepath, query_data, query_input_size, dimension);
+    int local_query_input_size;
+    float* local_query_data;
+    std::vector<int> local_query_indices;
 
     MPI_Barrier(MPI_COMM_WORLD);
     double search_start = MPI_Wtime();
 
     if (rank == 0) {
         std::vector<std::vector<int>> query_indices(world_size);
+        std::vector<std::vector<float*>> query_data_to_send(world_size);
         for (int i = 0; i < query_input_size; ++i) {
             float* query = query_data + i * dimension;            
             std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(query, branching_factor);
@@ -208,13 +213,22 @@ int main(int argc, char** argv) {
                 result.pop();
                 
                 query_indices[eligible_node].push_back(i);
+                query_data_to_send[eligible_node].push_back(query);
             }
         }
         for (int i = 1; i < world_size; ++i) {
             int local_query_input_size = query_indices[i].size();
             MPI_Send(&local_query_input_size, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
             if (local_query_input_size > 0) {
+                float** query_ptrs = query_data_to_send[i].data();
+                float* local_query_data = new float[local_query_input_size * dimension];
+                #pragma omp parallel for num_threads(p)
+                for (int j = 0; j < local_query_input_size; ++j) {
+                    std::memcpy(local_query_data + j * dimension, query_ptrs[j], dimension * sizeof(float));
+                }
+
                 MPI_Send(query_indices[i].data(), local_query_input_size, MPI_INT, i, 0, MPI_COMM_WORLD);
+                MPI_Send(local_query_data, local_query_input_size * dimension, MPI_FLOAT, i, 0, MPI_COMM_WORLD);
             }
         }
 
@@ -222,12 +236,22 @@ int main(int argc, char** argv) {
         if (local_query_input_size > 0) {
             local_query_indices.resize(local_query_input_size);
             std::copy(query_indices[0].begin(), query_indices[0].end(), local_query_indices.begin());
+
+            local_query_data = new float[local_query_input_size * dimension];
+            float** query_ptrs = query_data_to_send[0].data();
+            #pragma omp parallel for num_threads(p)
+            for (int j = 0; j < local_query_input_size; ++j) {
+                std::memcpy(local_query_data + j * dimension, query_ptrs[j], dimension * sizeof(float));
+            }
         }
     } else {
         MPI_Recv(&local_query_input_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         if (local_query_input_size > 0) {
             local_query_indices.resize(local_query_input_size);
             MPI_Recv(local_query_indices.data(), local_query_input_size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            local_query_data = new float[local_query_input_size * dimension];
+            MPI_Recv(local_query_data, local_query_input_size * dimension, MPI_FLOAT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
     }
 
@@ -246,7 +270,7 @@ int main(int argc, char** argv) {
         #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_query_input_size; ++i) {
             int query_index = local_query_indices[i];
-            float* query = query_data + query_index * dimension;
+            float* query = local_query_data + i * dimension;
             std::priority_queue<std::pair<float, hnswlib::labeltype>> result = local_hnsw->searchKnn(query, 1);
             float distance = result.top().first;
             int label_id = result.top().second;
