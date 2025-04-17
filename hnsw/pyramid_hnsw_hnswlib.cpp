@@ -50,77 +50,96 @@ void sample_input(float* datamatrix, int input_size, int dim,
     }
 }
 
-float euclideanDistance(const cv::Mat& centers, int i, int j) {
+float euclidean_distance(const cv::Mat& a, const cv::Mat& b) {
     
+    CV_Assert(a.cols == b.cols && a.rows == 1 && b.rows == 1);
     float dist = 0.0f;
-    for (int d = 0; d < centers.cols; ++d) {
-        float diff = centers.at<float>(i, d) - centers.at<float>(j, d);
+    for (int d = 0; d < a.cols; ++d) {
+        float diff = a.at<float>(0, d) - b.at<float>(0, d);
         dist += diff * diff;
     }
     return std::sqrt(dist);
 }
 
-void greedy_grouping(const cv::Mat& centers, int num_groups,
-    int k_neighbors, std::vector<int>& group_assignment, int p) {
+void greedy_grouping(const cv::Mat& centers, int w,
+    int k_neighbors, std::vector<int>& center_to_group, int p) {
     
     int m = centers.rows;
-    group_assignment.assign(m, -1);
+    center_to_group.assign(m, -1);
 
-    std::vector<std::vector<int>> knn_graph(m);
-
-    // Step 1: Build k-NN graph
+    // Find k nearest neighbors for each center.
+    std::vector<std::vector<int>> knn_centers_graph(m);
+    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < m; ++i) {
         std::priority_queue<std::pair<float, int>> pq;
         for (int j = 0; j < m; ++j) {
             if (i == j) continue;
-            float dist = 0.0f;
-            for (int d = 0; d < centers.cols; ++d) {
-                float diff = centers.at<float>(i, d) - centers.at<float>(j, d);
-                dist += diff * diff;
-            }
+            float dist = euclidean_distance(centers.row(i), centers.row(j));
             pq.push({dist, j});
             if ((int)pq.size() > k_neighbors)
                 pq.pop();
         }
 
         while (!pq.empty()) {
-            knn_graph[i].push_back(pq.top().second);
+            knn_centers_graph[i].push_back(pq.top().second);
             pq.pop();
         }
     }
 
-    // Step 2: Greedy balanced assignment
-    std::vector<int> group_sizes(num_groups, 0);
-    int max_group_size = (m + num_groups - 1) / num_groups;
+    std::vector<int> group_sizes(w, 0);
+    int max_group_size = (m + w - 1) / w;
 
-    for (int i = 0; i < std::min(num_groups, m); ++i) {
-        group_assignment[i] = i;
+    // Initializes the first w centers, each to a unique group.
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < std::min(w, m); ++i) {
+        center_to_group[i] = i;
         group_sizes[i]++;
     }
 
+    omp_lock_t locks[w];
+    for (int i = 0; i < w; ++i) omp_init_lock(&locks[i]);
+
+    // Assign remaining centers to groups based on their neighbors.
     #pragma omp parallel for num_threads(p)
-    for (int i = num_groups; i < m; ++i) {
-        std::vector<int> scores(num_groups, 0);
-        for (int neighbor : knn_graph[i]) {
-            int g = group_assignment[neighbor];
-            if (g != -1 && group_sizes[g] < max_group_size)
-                scores[g]++;
+    for (int i = w; i < m; ++i) {
+        std::vector<int> scores(w, 0);
+        for (int neighbor : knn_centers_graph[i]) {
+            int group = center_to_group[neighbor];
+            if (group != -1 && group_sizes[group] < max_group_size)
+                scores[group]++;
         }
 
-        int best_group = -1, max_score = -1;
-        for (int g = 0; g < num_groups; ++g) {
-            if (group_sizes[g] < max_group_size && scores[g] > max_score) {
-                max_score = scores[g];
-                best_group = g;
+        std::priority_queue<std::pair<int, int>> best_groups;
+        for (int group = 0; group < w; ++group) {
+            if (group_sizes[group] < max_group_size) {
+                best_groups.push({scores[group], group});
             }
         }
 
-        if (best_group == -1) {
-            best_group = std::min_element(group_sizes.begin(), group_sizes.end()) - group_sizes.begin();
+        bool best_group_found = false;
+        while (!best_groups.empty()) {
+            int best_group = best_groups.top().second;
+            best_groups.pop();
+
+            omp_set_lock(&locks[best_group]);
+            if (group_sizes[best_group] < max_group_size) {
+                center_to_group[i] = best_group;
+                group_sizes[best_group]++;
+                best_group_found = true;
+            }
+            omp_unset_lock(&locks[best_group]);
+
+            if (best_group_found) break;
         }
 
-        group_assignment[i] = best_group;
-        group_sizes[best_group]++;
+        if (!best_group_found) {
+            int best_group = std::min_element(group_sizes.begin(), group_sizes.end()) - group_sizes.begin();
+            center_to_group[i] = best_group;
+           
+            omp_set_lock(&locks[best_group]);
+            group_sizes[best_group]++;
+            omp_unset_lock(&locks[best_group]);
+        } 
     }
 }
 
