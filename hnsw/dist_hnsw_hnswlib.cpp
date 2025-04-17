@@ -57,9 +57,6 @@ int main(int argc, char** argv) {
     std::string query_input_filepath = argv[8];
     int query_input_size = std::stoi(argv[9]);
 
-    MPI_Barrier(MPI_COMM_WORLD);
-    double hnsw_build_start = MPI_Wtime();
-
     float* data = new float[input_size * dimension];
 
     int local_input_size = input_size / world_size;
@@ -70,7 +67,12 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         read_txt(input_filepath, data, input_size, dimension);
-        
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_start = MPI_Wtime();
+
+    if (rank == 0) {       
         // Randomize input data if specified.
         if (randomize_input) {
             std::random_device rd;
@@ -87,7 +89,6 @@ int main(int argc, char** argv) {
         }
 
         // Send data to other processes.
-        #pragma omp parallel for num_threads(p)
         for (int i = 1; i < world_size; ++i) {
             int start_index = i * local_input_size;
             int end_index = (i + 1) * local_input_size;
@@ -103,6 +104,9 @@ int main(int argc, char** argv) {
         MPI_Recv(local_data, local_input_size * dimension, MPI_FLOAT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
+    int label_start = 0;
+    MPI_Exscan(&local_input_size, &label_start, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
     // Initiate hnsw index.
     hnswlib::L2Space space(dimension);
     hnswlib::HierarchicalNSW<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
@@ -110,7 +114,7 @@ int main(int argc, char** argv) {
     // Add data to hnsw index.
     #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++) {
-        alg_hnsw->addPoint(local_data + i * dimension, i);
+        alg_hnsw->addPoint(local_data + i * dimension, label_start + i);
     }
 
     double hnsw_build_end = MPI_Wtime();
@@ -147,7 +151,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < query_input_size; ++i) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(query_data + i * dimension, 1);
         float distance = result.top().first;
-        int label_id = result.top().second + rank * (input_size / world_size);
+        int label_id = result.top().second;
 
         local_results[i].value = distance;
         local_results[i].id = label_id;
