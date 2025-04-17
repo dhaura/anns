@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
     build_hnsw(hnsw, input_size, datamatrix, l, M);
 
     double hnsw_build_end = omp_get_wtime();
-   double hnsw_build_duration = hnsw_build_end - hnsw_build_start;
+    double hnsw_build_duration = hnsw_build_end - hnsw_build_start;
     std::cout << "Time taken to build HNSW index: " << hnsw_build_duration << " seconds\n";
     
     ValueType2DVector<float> query_datamatrix;

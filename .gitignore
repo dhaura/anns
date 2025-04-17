@@ -31,6 +31,9 @@
 *.out
 *.app
 
+# Bin files
+*.bin
+
 # VS Code settings
 .vscode/
 
