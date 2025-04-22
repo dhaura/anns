@@ -40,29 +40,30 @@ mpirun -n <num_of_nodes> ./dist_hnsw.out <input_filepath> <input_size> <dimensio
 ```bash
 mpirun -n 4 ./dist_hnsw.out ../data/iris_dataset/iris.data.txt 150 4 5 12 15 2 0 ../data/iris_dataset/query/iris_query_points_1.txt
 ```
+
 #### 2.2 hnswlib
 1. Compile the code.
 ```bash
-mpic++ dist_hnsw_hnswlib.cpp -o dist_hnsw_hnswlib.out -fopenmp
+mpic++ dist_hnsw_hnswlib_v0.1.cpp -o dist_hnsw_hnswlib_v0.1.out -fopenmp
 ```
 2. Run the code.
 ```bash
-mpirun -n <num_of_nodes> ./dist_hnsw_hnswlib.out <input_filepath> <input_size> <dimension> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>
+mpirun -n <num_of_nodes> ./dist_hnsw_hnswlib_v0.1.out <input_filepath> <input_size> <dimension> <M> <ef_construction> <num_threads> <randomize_input>
 ```
 ```bash
-mpirun -n 4 ./dist_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 16 200 2 0 ../data/iris_dataset/query/iris_query_points_1.txt 11
+mpirun -n 4 ./dist_hnsw_hnswlib_v0.1.out ../data/iris_dataset/iris.data.txt 150 4 16 200 2 0
 ```
 
 ### 3. Distributed HNSW (Pyramid Approach)
-#### 2.1 hnswlib
+#### 3.1 hnswlib
 1. Compile the code.
 ```bash
-mpic++ pyramid_hnsw_hnswlib.cpp -o pyramid_hnsw_hnswlib.out -fopenmp `pkg-config --cflags --libs opencv4`
+mpic++ pyramid_hnsw_hnswlib_v2.1.cpp -o pyramid_hnsw_hnswlib_v2.1.out -fopenmp `pkg-config --cflags --libs opencv4`
 ```
 2. Run the code.
 ```bash
-mpirun -n <num_of_nodes> ./pyramid_hnsw_hnswlib.out . <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <query_input_filepath> <query_input_size>
+mpirun -n <num_of_nodes> ./pyramid_hnsw_hnswlib_v2.1.out . <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads>
 ```
 ```bash
-mpirun -n 4 ./pyramid_hnsw_hnswlib.out ../data/iris_dataset/iris.data.txt 150 4 30 12 2 16 200 2 ../data/iris_dataset/query/iris_query_points_1.txt 11
+mpirun -n 4 ./pyramid_hnsw_hnswlib_v2.1.out ../data/iris_dataset/iris.data.txt 150 4 30 12 2 16 200 2
 ```
