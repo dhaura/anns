@@ -15,39 +15,25 @@ int read_txt(std::string filename, Float2DVector *datamatrix,
              int no_of_datapoints, int dim, int rank, int world_size, int offset = 0)
 {
 
-    std::ifstream infile(filename);       // Open the file for reading
-    std::vector<std::vector<float>> data; // Vector to hold the loaded data
-
+    std::ifstream infile(filename); // Open the file for reading.
     if (!infile.is_open())
     {
-        // Handle file opening error
+        // Handle file opening error.
         std::cerr << "Error: Unable to open the file " << filename << std::endl;
         return -1;
     }
 
     int chunk_size = no_of_datapoints / world_size;
     int start_idx = rank * chunk_size;
-    int end_index = 0;
 
-    if (rank < world_size - 1)
+    if (rank == world_size - 1)
     {
-        end_index = (rank + 1) * chunk_size - 1;
-    }
-    else if (rank == world_size - 1)
-    {
-        end_index = std::min((rank + 1) * chunk_size - 1, no_of_datapoints - 1);
         chunk_size = no_of_datapoints - rank * chunk_size;
     }
 
-    if (chunk_size == -1)
-    {
-        chunk_size = no_of_datapoints - start_idx;
-    }
-
-    // Skip lines up to start_idx
+    // Skip lines up to start_idx.
     std::string line;
-    for (int i = 0; i < start_idx + offset && std::getline(infile, line); ++i)
-        ;
+    for (int i = 0; i < start_idx + offset && std::getline(infile, line); ++i);
 
     for (int i = 0; i < chunk_size; ++i)
     {
@@ -57,20 +43,13 @@ int read_txt(std::string filename, Float2DVector *datamatrix,
             std::istringstream iss(line);
             float value;
 
-            // Read each value (label followed by features)
+            // Read each value (label followed by features).
             while (iss >> value)
             {
                 row.push_back(value);
             }
-            data.push_back(row);
+            (*datamatrix).push_back(row);
         }
-
-        // Add the row (data vector) to the data vector
-    }
-    datamatrix->resize(data.size());
-    for (int i = 0; i < data.size(); i++)
-    {
-        (*datamatrix)[i] = data[i];
     }
 
     return chunk_size;
@@ -80,12 +59,10 @@ void read_full_txt(std::string filename, Float2DVector *datamatrix,
                    int input_size, int dimension)
 {
 
-    std::ifstream infile(filename);       // Open the file for reading
-    std::vector<std::vector<float>> data; // Vector to hold the loaded data
-
+    std::ifstream infile(filename); // Open the file for reading.
     if (!infile.is_open())
     {
-        // Handle file opening error
+        // Handle file opening error.
         std::cerr << "Error: Unable to open the file " << filename << std::endl;
     }
 
@@ -98,20 +75,13 @@ void read_full_txt(std::string filename, Float2DVector *datamatrix,
             std::istringstream iss(line);
             float value;
 
-            // Read each value (label followed by features)
+            // Read each value (label followed by features).
             while (iss >> value)
             {
                 row.push_back(value);
             }
-            data.push_back(row);
+            (*datamatrix).push_back(row);
         }
-
-        // Add the row (data vector) to the data vector
-    }
-    datamatrix->resize(data.size());
-    for (int i = 0; i < data.size(); i++)
-    {
-        (*datamatrix)[i] = data[i];
     }
 }
 
@@ -119,26 +89,26 @@ void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_s
                   int num_samples, float *&sampled_data, int p)
 {
 
-    // Initialize random number generator
+    // Initialize random number generator.
     std::random_device rd;
     std::mt19937 rng(rd());
 
-    // Create a vector to store the indices
+    // Create a vector to store the indices.
     std::vector<int> indices(input_size);
-    std::iota(indices.begin(), indices.end(), 0); // Fill indices from 0 to input_size-1
+    std::iota(indices.begin(), indices.end(), 0); // Fill indices from 0 to input_size - 1.
 
-    // Shuffle the indices randomly
+    // Shuffle the indices randomly.
     std::shuffle(indices.begin(), indices.end(), rng);
 
-    // Allocate memory for the 1D float array
+    // Allocate memory for the 1D float array.
     sampled_data = new float[num_samples * dim];
 
-    // Fill the sampled_data array
+    // Fill the sampled_data array.
     #pragma omp parallel for num_threads(p)
     for (int i = 0; i < num_samples; ++i)
     {
-        int idx = indices[i]; // Get the index of the sampled row
-        // Copy the entire row from datamatrix[idx] directly to sampled_data
+        int idx = indices[i]; // Get the index of the sampled row.
+        // Copy the entire row from datamatrix[idx] directly to sampled_data.
         std::memcpy(sampled_data + i * dim, datamatrix[idx].data(), dim * sizeof(float));
     }
 }
@@ -175,6 +145,7 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
     }
 
     omp_lock_t locks[w];
+    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < w; ++i)
         omp_init_lock(&locks[i]);
 
@@ -236,14 +207,24 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
             omp_unset_lock(&locks[best_group]);
         }
     }
+
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < w; ++i)
+        omp_destroy_lock(&locks[i]);
 }
 
 void distribute_data_matrix(Float2DVector &datamatrix, std::vector<std::pair<int, std::vector<float>>> &local_datamatrix, hnswlib::HierarchicalNSW<float> &meta_hnsw,
-                            std::vector<int> &center_to_group, int k, int input_size, int dim, int rank, int world_size)
+                            std::vector<int> &center_to_group, int k, int input_size, int dim, int rank, int world_size, int p)
 {
-
     int label_offset = rank * (input_size / world_size);
     Float2DVector data_to_send(world_size);
+
+    omp_lock_t locks[world_size];
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < world_size; ++i)
+        omp_init_lock(&locks[i]);
+
+    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < datamatrix.size(); ++i)
     {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> centers = meta_hnsw.searchKnn(datamatrix[i].data(), k);
@@ -261,40 +242,55 @@ void distribute_data_matrix(Float2DVector &datamatrix, std::vector<std::pair<int
                 continue;
             }
 
+            // Vector to be sent to a process -> a set of vectors of (label + data vector).
+            omp_set_lock(&locks[group]);
             data_to_send[group].push_back(static_cast<float>(label));
             data_to_send[group].insert(data_to_send[group].end(), datamatrix[i].begin(), datamatrix[i].end());
+            omp_unset_lock(&locks[group]);
         }
     }
 
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < world_size; ++i)
+        omp_destroy_lock(&locks[i]);
+
     std::vector<float> send_buffer;
     std::vector<int> send_counts(world_size), recv_counts(world_size);
+    // Flatten the data_to_send vector into send_buffer.
     for (int i = 0; i < world_size; ++i)
     {
         send_counts[i] = data_to_send[i].size();
         send_buffer.insert(send_buffer.end(), data_to_send[i].begin(), data_to_send[i].end());
     }
 
+    // Gather the sizes of the data to be received from each process.
     MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
-    std::vector<int> sdispls(world_size, 0), rdispls(world_size, 0);
+    // Calculate the displacements (offsets) for send and receive buffers for each processor.
+    std::vector<int> send_offsets(world_size, 0), recv_offsets(world_size, 0);
     for (int i = 1; i < world_size; ++i)
     {
-        sdispls[i] = sdispls[i - 1] + send_counts[i - 1];
-        rdispls[i] = rdispls[i - 1] + recv_counts[i - 1];
+        send_offsets[i] = send_offsets[i - 1] + send_counts[i - 1];
+        recv_offsets[i] = recv_offsets[i - 1] + recv_counts[i - 1];
     }
 
-    int total_recv = rdispls.back() + recv_counts.back();
-    std::vector<float> recv_buffer(total_recv);
+    int total_recv_count = recv_offsets.back() + recv_counts.back();
+    std::vector<float> recv_buffer(total_recv_count);
 
-    MPI_Alltoallv(send_buffer.data(), send_counts.data(), sdispls.data(), MPI_FLOAT,
-                  recv_buffer.data(), recv_counts.data(), rdispls.data(), MPI_FLOAT,
+    MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_offsets.data(), MPI_FLOAT,
+                  recv_buffer.data(), recv_counts.data(), recv_offsets.data(), MPI_FLOAT,
                   MPI_COMM_WORLD);
-
-    for (int i = 0; i < total_recv; i += dim + 1)
+    
+    // Process the received flattened data and fill the local_datamatrix.
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < total_recv_count; i += dim + 1)  // label + data vector -> dim + 1
     {
         int label = static_cast<int>(recv_buffer[i]);
         std::vector<float> features(recv_buffer.begin() + i + 1, recv_buffer.begin() + i + 1 + dim);
-        local_datamatrix.emplace_back(label, features);
+        #pragma omp critical
+        {
+            local_datamatrix.emplace_back(label, features);
+        }
     }
 }
 
@@ -307,9 +303,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 13)
+    if (argc < 12)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <query_input_filepath> <query_input_size>" << std::endl;
         return 1;
     }
 
@@ -323,9 +319,8 @@ int main(int argc, char **argv)
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
     int p = std::stoi(argv[9]);
-    bool randomize_input = std::stoi(argv[10]);
-    std::string query_input_filepath = argv[11];
-    int query_input_size = std::stoi(argv[12]);
+    std::string query_input_filepath = argv[10];
+    int query_input_size = std::stoi(argv[11]);
 
     Float2DVector datamatrix;
     int chunk_size;
@@ -390,7 +385,7 @@ int main(int argc, char **argv)
     MPI_Bcast(center_to_group.data(), m, MPI_INT, 0, MPI_COMM_WORLD);
 
     std::vector<std::pair<int, std::vector<float>>> local_datamatrix;
-    distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size);
+    distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size, p);
 
     int local_input_size = local_datamatrix.size();
 
@@ -408,7 +403,7 @@ int main(int argc, char **argv)
     double hnsw_build_end = MPI_Wtime();
     double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
     double global_hnsw_build_duration;
-    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank == 0)
     {
         std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
@@ -422,7 +417,7 @@ int main(int argc, char **argv)
     double search_start = MPI_Wtime();
 
     std::vector<std::pair<int, std::vector<float>>> local_query_datamatrix;
-    distribute_data_matrix(query_datamatrix, local_query_datamatrix, *meta_hnsw, center_to_group, k, query_input_size, dimension, rank, world_size);
+    distribute_data_matrix(query_datamatrix, local_query_datamatrix, *meta_hnsw, center_to_group, k, query_input_size, dimension, rank, world_size, p);
 
     int local_query_input_size = local_query_datamatrix.size();
 
@@ -462,7 +457,7 @@ int main(int argc, char **argv)
     double search_end = MPI_Wtime();
     double local_search_duration = search_end - search_start;
     double global_search_duration;
-    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {

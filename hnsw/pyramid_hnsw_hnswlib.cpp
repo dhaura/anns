@@ -163,9 +163,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 13)
+    if (argc < 12)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <query_input_filepath> <query_input_size>" << std::endl;
         return 1;
     }
 
@@ -179,9 +179,8 @@ int main(int argc, char **argv)
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
     int p = std::stoi(argv[9]);
-    bool randomize_input = std::stoi(argv[10]);
-    std::string query_input_filepath = argv[11];
-    int query_input_size = std::stoi(argv[12]);
+    std::string query_input_filepath = argv[10];
+    int query_input_size = std::stoi(argv[11]);
 
     float *data;
     int local_input_size;
@@ -302,7 +301,7 @@ int main(int argc, char **argv)
     double hnsw_build_end = MPI_Wtime();
     double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
     double global_hnsw_build_duration;
-    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank == 0)
     {
         std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
@@ -429,13 +428,14 @@ int main(int argc, char **argv)
     double search_end = MPI_Wtime();
     double local_search_duration = search_end - search_start;
     double global_search_duration;
-    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {
         std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         hnswlib::BruteforceSearch<float> *alg_brute = new hnswlib::BruteforceSearch<float>(&space, input_size);
+        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < input_size; i++)
         {
             alg_brute->addPoint(data + i * dimension, i);

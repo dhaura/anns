@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
     double hnsw_build_end = MPI_Wtime();
     double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
     double hnsw_build_duration;
-    MPI_Reduce(&local_hnsw_build_duration, &hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_hnsw_build_duration, &hnsw_build_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank == 0) {
         std::cout << "Time taken to build HNSW index: " << hnsw_build_duration << " seconds\n";
     }
@@ -316,7 +316,7 @@ int main(int argc, char** argv) {
     double search_end = MPI_Wtime();
     double local_search_duration = search_end - search_start;
     double search_duration;
-    MPI_Reduce(&local_search_duration, &search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_search_duration, &search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     
     if (rank == 0) {
         std::cout << "Time taken for search: " << search_duration << " seconds\n";
