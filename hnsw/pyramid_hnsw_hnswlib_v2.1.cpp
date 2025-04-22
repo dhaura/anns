@@ -358,6 +358,7 @@ int main(int argc, char **argv)
     distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size, p);
 
     int local_input_size = local_datamatrix.size();
+    std::cout << "Rank " << rank << " recieved " << local_input_size << " data points.\n";
 
     // Initiate hnsw index.
     hnswlib::L2Space space(dimension);
