@@ -97,11 +97,10 @@ float euclidean_distance(const cv::Mat &a, const cv::Mat &b)
     return std::sqrt(dist);
 }
 
-void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<float> &meta_hnsw,
+void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, hnswlib::HierarchicalNSW<float> &meta_hnsw,
                      int k_neighbors, std::vector<int> &center_to_group, int p)
 {
 
-    int m = centers.rows;
     center_to_group.assign(m, -1);
 
     std::vector<int> group_sizes(w, 0);
@@ -125,7 +124,7 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
     for (int i = w; i < m; ++i)
     {
         std::vector<int> scores(w, 0);
-        std::priority_queue<std::pair<float, hnswlib::labeltype>> neighbors = meta_hnsw.searchKnn(centers.ptr<float>(i), k_neighbors);
+        std::priority_queue<std::pair<float, hnswlib::labeltype>> neighbors = meta_hnsw.searchKnn(centers.data() + i * dim, k_neighbors);
         while (!neighbors.empty())
         {
             int neighbor = neighbors.top().second;
@@ -313,6 +312,7 @@ int main(int argc, char **argv)
                0, MPI_COMM_WORLD);
 
     std::vector<int> center_to_group(m);
+    std::vector<float> m_centers(m * dimension);
 
     if (rank == 0)
     {
@@ -324,8 +324,6 @@ int main(int argc, char **argv)
         cv::Mat labels;
         cv::Mat centers;
 
-        float *m_centers;
-
         // Declare kmeans flags.
         cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 100, 0.1);
         int attempts = 3;
@@ -334,31 +332,33 @@ int main(int argc, char **argv)
         // Run kmeans for m centers.
         cv::kmeans(sampled_data, m, labels, criteria, attempts, flags, centers);
 
-        meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, m, M, ef_construction);
         #pragma omp parallel for num_threads(p)
-        for (int i = 0; i < m; i++)
+        for (int i = 0; i < m; ++i)
         {
-            meta_hnsw->addPoint(centers.ptr<float>(i), i);
+            std::memcpy(m_centers.data() + i * dimension, centers.ptr<float>(i), dimension * sizeof(float));
         }
-
-        greedy_grouping(centers, w, *meta_hnsw, 5, center_to_group, p);
-        meta_hnsw->saveIndex(meta_hnsw_path);
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Bcast(m_centers.data(), m * dimension, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-    if (rank != 0)
+    meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, m, M, ef_construction);
+    #pragma omp parallel for num_threads(p)
+    for (int i = 0; i < m; i++)
     {
-        meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, meta_hnsw_path);
+        meta_hnsw->addPoint(m_centers.data() + i * dimension, i);
     }
 
+    if (rank == 0)
+    {
+        greedy_grouping(m_centers, world_size, m, dimension, *meta_hnsw, k, center_to_group, p);
+    }
     MPI_Bcast(center_to_group.data(), m, MPI_INT, 0, MPI_COMM_WORLD);
 
     Float2DPairVector local_datamatrix;
     distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size, p);
 
     int local_input_size = local_datamatrix.size();
-    std::cout << "Rank " << rank << " recieved " << local_input_size << " data points.\n";
+    std::cout << "Rank " << rank << ": " << local_input_size << std::endl;
 
     // Initiate hnsw index.
     hnswlib::L2Space space(dimension);
