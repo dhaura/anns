@@ -5,6 +5,9 @@
 #include <ctime>
 #include <algorithm>
 #include <numeric>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <mpi.h>
 #include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
@@ -12,7 +15,7 @@
 using Float2DVector = std::vector<std::vector<float>>;
 using Float2DPairVector = std::vector<std::pair<int, std::vector<float>>>;
 
-int read_txt(std::string filename, Float2DVector *datamatrix,
+void read_txt(std::string filename, Float2DVector *datamatrix,
              int no_of_datapoints, int dim, int rank, int world_size, int offset = 0)
 {
 
@@ -21,7 +24,7 @@ int read_txt(std::string filename, Float2DVector *datamatrix,
     {
         // Handle file opening error.
         std::cerr << "Error: Unable to open the file " << filename << std::endl;
-        return -1;
+        return;
     }
 
     int chunk_size = no_of_datapoints / world_size;
@@ -52,8 +55,26 @@ int read_txt(std::string filename, Float2DVector *datamatrix,
             (*datamatrix).push_back(row);
         }
     }
+}
 
-    return chunk_size;
+void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, float index_time, float search_time, double recall) {
+    
+    std::ofstream file(filepath, std::ios::app);  // Open in append mode.
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filepath << " for appending.\n";
+        return;
+    }
+
+    file << input_size << "," 
+         << world_size << ","
+         << sample_size << ","
+         << m << ","
+         << branching_factor << ","
+         << index_time << ","
+         << search_time << ","
+         << recall << "\n";
+
+    file.close();
 }
 
 void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_size, int dim,
@@ -82,19 +103,6 @@ void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_s
         // Copy the entire row from datamatrix[idx] directly to sampled_data.
         std::memcpy(sampled_data + i * dim, datamatrix[idx].data(), dim * sizeof(float));
     }
-}
-
-float euclidean_distance(const cv::Mat &a, const cv::Mat &b)
-{
-
-    CV_Assert(a.cols == b.cols && a.rows == 1 && b.rows == 1);
-    float dist = 0.0f;
-    for (int d = 0; d < a.cols; ++d)
-    {
-        float diff = a.at<float>(0, d) - b.at<float>(0, d);
-        dist += diff * diff;
-    }
-    return std::sqrt(dist);
 }
 
 void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, hnswlib::HierarchicalNSW<float> &meta_hnsw,
@@ -276,7 +284,7 @@ int main(int argc, char **argv)
 
     if (argc < 10)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <output_filepath>" << std::endl;
         return 1;
     }
 
@@ -290,10 +298,11 @@ int main(int argc, char **argv)
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
     int p = std::stoi(argv[9]);
+    std::string output_filepath = argv[10];
 
     Float2DVector datamatrix;
-    int chunk_size;
-    chunk_size = read_txt(input_filepath, &datamatrix, input_size, dimension, rank, world_size);
+    read_txt(input_filepath, &datamatrix, input_size, dimension, rank, world_size);
+    int chunk_size = datamatrix.size();
 
     hnswlib::L2Space meta_space(dimension);
     hnswlib::HierarchicalNSW<float> *meta_hnsw;
@@ -358,7 +367,6 @@ int main(int argc, char **argv)
     distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size, p);
 
     int local_input_size = local_datamatrix.size();
-    std::cout << "Rank " << rank << ": " << local_input_size << std::endl;
 
     // Initiate hnsw index.
     hnswlib::L2Space space(dimension);
@@ -443,6 +451,8 @@ int main(int argc, char **argv)
 
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << std::endl;
+
+        write_to_output(output_filepath, input_size, world_size, global_sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall);
     }
 
     MPI_Finalize();

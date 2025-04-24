@@ -60,10 +60,73 @@ mpirun -n 4 ./dist_hnsw_hnswlib_v0.1.out ../data/iris_dataset/iris.data.txt 150 
 ```bash
 mpic++ pyramid_hnsw_hnswlib_v2.1.cpp -o pyramid_hnsw_hnswlib_v2.1.out -fopenmp `pkg-config --cflags --libs opencv4`
 ```
+```bash
+mpic++ -fopenmp pyramid_hnsw_hnswlib_v2.1.cpp \
+  -I$SCRATCH/apps/opencv-4.9.0/include/opencv4 \
+  -L$SCRATCH/apps/opencv-4.9.0/lib64 \
+  -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs \
+  -o pyramid_hnsw_hnswlib_v2.1.out
+```
 2. Run the code.
 ```bash
 mpirun -n <num_of_nodes> ./pyramid_hnsw_hnswlib_v2.1.out . <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads>
 ```
 ```bash
 mpirun -n 4 ./pyramid_hnsw_hnswlib_v2.1.out ../data/iris_dataset/iris.data.txt 150 4 30 12 2 16 200 2
+```
+
+Setting up Glove dataset.
+```bash
+mkdir glove
+cd glove
+wget https://nlp.stanford.edu/data/glove.840B.300d.zip
+unzip glove.840B.300d.zip
+rm glove.840B.300d.zip
+```
+
+Installing hnswlib
+```bash
+git clone https://github.com/nmslib/hnswlib.git
+```
+Initialization
+```bash
+module load GCC OpenMPI
+
+export PKG_CONFIG_PATH=$SCRATCH/apps/opencv-4.9.0/lib64/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=$SCRATCH/apps/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
+```
+
+Interactive Allocation
+```bash
+salloc --nodes=1 --ntasks-per-node=8 -t 00:05:00 --mem-per-cpu=5GB 
+```
+
+OpenCV Installation
+```bash
+mkdir -p $SCRATCH/apps/opencv_build
+cd $SCRATCH/apps/opencv_build
+
+git clone https://github.com/opencv/opencv.git
+git clone https://github.com/opencv/opencv_contrib.git
+cd opencv
+git checkout 4.9.0
+cd ../opencv_contrib
+git checkout 4.9.0
+
+mkdir -p ../build && cd ../build
+cmake ../opencv \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$SCRATCH/apps/opencv-4.9.0 \
+  -DOPENCV_EXTRA_MODULES_PATH=../opencv_contrib/modules \
+  -DBUILD_opencv_python3=OFF \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_TESTS=OFF \
+  -DWITH_OPENMP=ON \
+  -DWITH_TBB=ON \
+  -DWITH_EIGEN=ON \
+  -DBUILD_SHARED_LIBS=ON \
+  -DCMAKE_CXX_STANDARD=17
+
+make -j$(nproc)
+make install
 ```

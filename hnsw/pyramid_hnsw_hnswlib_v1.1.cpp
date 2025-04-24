@@ -5,6 +5,9 @@
 #include <ctime>
 #include <algorithm>
 #include <numeric>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <mpi.h>
 #include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
@@ -36,6 +39,26 @@ void read_txt(std::string filename, float *data, int input_size, int dimension)
     {
         std::cerr << "Error opening file: " << filename << std::endl;
     }
+}
+
+void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, float index_time, float search_time, double recall) {
+    
+    std::ofstream file(filepath, std::ios::app);  // Open in append mode.
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filepath << " for appending.\n";
+        return;
+    }
+
+    file << input_size << "," 
+         << world_size << ","
+         << sample_size << ","
+         << m << ","
+         << branching_factor << ","
+         << index_time << ","
+         << search_time << ","
+         << recall << "\n";
+
+    file.close();
 }
 
 void sample_input(float *datamatrix, int input_size, int dim,
@@ -163,9 +186,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 10)
+    if (argc < 11)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <output_filepath>" << std::endl;
         return 1;
     }
 
@@ -179,6 +202,7 @@ int main(int argc, char **argv)
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
     int p = std::stoi(argv[9]);
+    std::string output_filepath = argv[10];
 
     float *data;
     int local_input_size;
@@ -444,6 +468,8 @@ int main(int argc, char **argv)
 
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << std::endl;
+
+        write_to_output(output_filepath, input_size, world_size, sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall);
     }
 
     MPI_Finalize();
