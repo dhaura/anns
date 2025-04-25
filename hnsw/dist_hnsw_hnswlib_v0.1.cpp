@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <random>
 #include <string>
-#include <omp.h>
 #include <mpi.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
@@ -36,17 +35,21 @@ void read_txt(std::string filename, float* data, int input_size, int dimension) 
 
 void write_to_output(const std::string& filepath, int input_size, int world_size, float index_time, float search_time, double recall) {
     
-    std::ofstream file(filepath, std::ios::app);  // Open in append mode.
+    std::ofstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filepath << " for appending.\n";
+        std::cerr << "Error: Could not open file " << filepath << " for writing.\n";
         return;
     }
 
     file << input_size << "," 
          << world_size << ","
+         << -1 << ","
+         << -1 << ","
+         << world_size << ","
          << index_time << ","
          << search_time << ","
-         << recall << "\n";
+         << recall << ","
+         << 1 << "\n";
 
     file.close();
 }
@@ -59,8 +62,8 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 9) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <M> <ef_construction> <num_threads> <randomize_input> <output_file>" << std::endl;
+    if (argc < 7) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <M> <ef_construction> <randomize_input> <output_file>" << std::endl;
         return 1;
     }
     
@@ -70,9 +73,8 @@ int main(int argc, char** argv) {
     int dimension = std::stoi(argv[3]);
     int M = std::stoi(argv[4]);
     int ef_construction = std::stoi(argv[5]);
-    int p = std::stoi(argv[6]);
-    bool randomize_input = std::stoi(argv[7]);
-    std::string output_filepath = argv[8];
+    bool randomize_input = std::stoi(argv[6]);
+    std::string output_filepath = argv[7];
 
     float* data = new float[input_size * dimension];
 
@@ -99,7 +101,6 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {       
         // Copy local data for process 0.
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i) {
             for (int j = 0; j < dimension; ++j) {
                 local_data[i * dimension + j] = data[i * dimension + j];
@@ -130,7 +131,6 @@ int main(int argc, char** argv) {
     hnswlib::HierarchicalNSW<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
 
     // Add data to hnsw index.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++) {
         alg_hnsw->addPoint(local_data + i * dimension, label_start + i);
     }
@@ -155,7 +155,6 @@ int main(int argc, char** argv) {
     } local_results[query_input_size], global_results[query_input_size];
 
     // Find nearest neighbors of the queries using HNSW.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < query_input_size; ++i) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(query_data + i * dimension, 1);
         float distance = result.top().first;
@@ -178,7 +177,6 @@ int main(int argc, char** argv) {
 
         // Calculate recall.
         double correct = 0;
-        #pragma omp parallel for num_threads(p) reduction(+:correct)
         for (int i = 0; i < query_input_size; i++) {
             if (global_results[i].id == i) {
                 correct++;

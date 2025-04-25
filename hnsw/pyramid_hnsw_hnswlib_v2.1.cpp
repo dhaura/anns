@@ -9,7 +9,6 @@
 #include <sstream>
 #include <string>
 #include <mpi.h>
-#include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
 using Float2DVector = std::vector<std::vector<float>>;
@@ -57,11 +56,12 @@ void read_txt(std::string filename, Float2DVector *datamatrix,
     }
 }
 
-void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, float index_time, float search_time, double recall) {
+void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, 
+                    float index_time, float search_time, double recall, double activation_rate) {
     
-    std::ofstream file(filepath, std::ios::app);  // Open in append mode.
+    std::ofstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filepath << " for appending.\n";
+        std::cerr << "Error: Could not open file " << filepath << " for writing.\n";
         return;
     }
 
@@ -72,13 +72,14 @@ void write_to_output(const std::string& filepath, int input_size, int world_size
          << branching_factor << ","
          << index_time << ","
          << search_time << ","
-         << recall << "\n";
+         << recall << ","
+         << activation_rate << "\n";
 
     file.close();
 }
 
 void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_size, int dim,
-                  int num_samples, float *&sampled_data, int p)
+                  int num_samples, float *&sampled_data)
 {
 
     // Initialize random number generator.
@@ -96,7 +97,6 @@ void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_s
     sampled_data = new float[num_samples * dim];
 
     // Fill the sampled_data array.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < num_samples; ++i)
     {
         int idx = indices[i]; // Get the index of the sampled row.
@@ -106,7 +106,7 @@ void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_s
 }
 
 void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, hnswlib::HierarchicalNSW<float> &meta_hnsw,
-                     int k_neighbors, std::vector<int> &center_to_group, int p)
+                     int k_neighbors, std::vector<int> &center_to_group)
 {
 
     center_to_group.assign(m, -1);
@@ -115,20 +115,13 @@ void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, h
     int max_group_size = (m + w - 1) / w;
 
     // Initializes the first w centers, each to a unique group.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < std::min(w, m); ++i)
     {
         center_to_group[i] = i;
         group_sizes[i]++;
     }
 
-    omp_lock_t locks[w];
-    #pragma omp parallel for num_threads(p)
-    for (int i = 0; i < w; ++i)
-        omp_init_lock(&locks[i]);
-
     // Assign remaining centers to groups based on their neighbors.
-    #pragma omp parallel for num_threads(p)
     for (int i = w; i < m; ++i)
     {
         std::vector<int> scores(w, 0);
@@ -162,14 +155,12 @@ void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, h
             int best_group = best_groups.top().second;
             best_groups.pop();
 
-            omp_set_lock(&locks[best_group]);
             if (group_sizes[best_group] < max_group_size)
             {
                 center_to_group[i] = best_group;
                 group_sizes[best_group]++;
                 best_group_found = true;
             }
-            omp_unset_lock(&locks[best_group]);
 
             if (best_group_found)
                 break;
@@ -179,31 +170,19 @@ void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, h
         {
             int best_group = std::min_element(group_sizes.begin(), group_sizes.end()) - group_sizes.begin();
             center_to_group[i] = best_group;
-
-            omp_set_lock(&locks[best_group]);
             group_sizes[best_group]++;
-            omp_unset_lock(&locks[best_group]);
         }
     }
-
-    #pragma omp parallel for num_threads(p)
-    for (int i = 0; i < w; ++i)
-        omp_destroy_lock(&locks[i]);
 }
 
-void distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &local_datamatrix, hnswlib::HierarchicalNSW<float> &meta_hnsw,
-                            std::vector<int> &center_to_group, int k, int input_size, int dim, int rank, int world_size, int p)
+double distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &local_datamatrix, hnswlib::HierarchicalNSW<float> &meta_hnsw,
+                            std::vector<int> &center_to_group, int k, int input_size, int dim, int rank, int world_size)
 {
     
     int label_offset = rank * (input_size / world_size);
     Float2DVector data_to_send(world_size);
 
-    omp_lock_t locks[world_size];
-    #pragma omp parallel for num_threads(p)
-    for (int i = 0; i < world_size; ++i)
-        omp_init_lock(&locks[i]);
-
-    #pragma omp parallel for num_threads(p)
+    double activations = 0.0;
     for (int i = 0; i < datamatrix.size(); ++i)
     {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> centers = meta_hnsw.searchKnn(datamatrix[i].data(), k);
@@ -222,16 +201,12 @@ void distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &local_
             }
 
             // Vector to be sent to a process -> a set of vectors of (label + data vector).
-            omp_set_lock(&locks[group]);
             data_to_send[group].push_back(static_cast<float>(label));
             data_to_send[group].insert(data_to_send[group].end(), datamatrix[i].begin(), datamatrix[i].end());
-            omp_unset_lock(&locks[group]);
+            visited_groups.push_back(group);
+            activations++;
         }
     }
-
-    #pragma omp parallel for num_threads(p)
-    for (int i = 0; i < world_size; ++i)
-        omp_destroy_lock(&locks[i]);
 
     std::vector<float> send_buffer;
     std::vector<int> send_counts(world_size), recv_counts(world_size);
@@ -261,16 +236,15 @@ void distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &local_
                   MPI_COMM_WORLD);
     
     // Process the received flattened data and fill the local_datamatrix.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < total_recv_count; i += dim + 1)  // label + data vector -> dim + 1
     {
         int label = static_cast<int>(recv_buffer[i]);
         std::vector<float> features(recv_buffer.begin() + i + 1, recv_buffer.begin() + i + 1 + dim);
-        #pragma omp critical
-        {
-            local_datamatrix.emplace_back(label, features);
-        }
+        local_datamatrix.emplace_back(label, features);
+
     }
+
+    return activations;
 }
 
 int main(int argc, char **argv)
@@ -282,9 +256,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 10)
+    if (argc < 9)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <output_filepath>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <output_filepath>" << std::endl;
         return 1;
     }
 
@@ -297,8 +271,7 @@ int main(int argc, char **argv)
     int k = std::stoi(argv[6]);
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
-    int p = std::stoi(argv[9]);
-    std::string output_filepath = argv[10];
+    std::string output_filepath = argv[9];
 
     Float2DVector datamatrix;
     read_txt(input_filepath, &datamatrix, input_size, dimension, rank, world_size);
@@ -313,12 +286,17 @@ int main(int argc, char **argv)
 
     int sample_size = global_sample_size / world_size;
     float *sampled_data = new float[sample_size * dimension];
-    sample_input(datamatrix, chunk_size, dimension, sample_size, sampled_data, p);
+    sample_input(datamatrix, chunk_size, dimension, sample_size, sampled_data);
 
     float *global_sampled_data = new float[global_sample_size * dimension];
     MPI_Gather(sampled_data, sample_size * dimension, MPI_FLOAT,
                global_sampled_data, sample_size * dimension, MPI_FLOAT,
                0, MPI_COMM_WORLD);
+
+    if (rank == 0)
+    {
+        std::cout << "Sampled data size: " << global_sample_size << " x " << dimension << std::endl;
+    }
 
     std::vector<int> center_to_group(m);
     std::vector<float> m_centers(m * dimension);
@@ -341,7 +319,6 @@ int main(int argc, char **argv)
         // Run kmeans for m centers.
         cv::kmeans(sampled_data, m, labels, criteria, attempts, flags, centers);
 
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < m; ++i)
         {
             std::memcpy(m_centers.data() + i * dimension, centers.ptr<float>(i), dimension * sizeof(float));
@@ -351,7 +328,6 @@ int main(int argc, char **argv)
     MPI_Bcast(m_centers.data(), m * dimension, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
     meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, m, M, ef_construction);
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < m; i++)
     {
         meta_hnsw->addPoint(m_centers.data() + i * dimension, i);
@@ -359,12 +335,22 @@ int main(int argc, char **argv)
 
     if (rank == 0)
     {
-        greedy_grouping(m_centers, world_size, m, dimension, *meta_hnsw, k, center_to_group, p);
+        std::cout << "Meta HNSW index built with " << m << " centers.\n";
+    }
+
+    if (rank == 0)
+    {
+        greedy_grouping(m_centers, world_size, m, dimension, *meta_hnsw, k, center_to_group);
     }
     MPI_Bcast(center_to_group.data(), m, MPI_INT, 0, MPI_COMM_WORLD);
 
+    if (rank == 0)
+    {
+        std::cout << "Greedy grouping completed.\n";
+    }
+
     Float2DPairVector local_datamatrix;
-    distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size, p);
+    double _ = distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size);
 
     int local_input_size = local_datamatrix.size();
 
@@ -373,7 +359,6 @@ int main(int argc, char **argv)
     hnswlib::HierarchicalNSW<float> *local_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
 
     // Add data to hnsw index.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++)
     {
         local_hnsw->addPoint(local_datamatrix[i].second.data(), local_datamatrix[i].first);
@@ -393,7 +378,12 @@ int main(int argc, char **argv)
 
     int query_input_size = input_size;
     Float2DPairVector local_query_datamatrix;
-    distribute_data_matrix(datamatrix, local_query_datamatrix, *meta_hnsw, center_to_group, k, query_input_size, dimension, rank, world_size, p);
+    double activations = distribute_data_matrix(datamatrix, local_query_datamatrix, *meta_hnsw, center_to_group, k, query_input_size, dimension, rank, world_size);
+
+    if (rank == 0)
+    {
+        std::cout << "Query data distibution is completed.\n";
+    }
 
     int local_query_input_size = local_query_datamatrix.size();
 
@@ -403,7 +393,6 @@ int main(int argc, char **argv)
         int id;
     } local_results[query_input_size], global_results[query_input_size];
 
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < query_input_size; ++i)
     {
         local_results[i].id = -1;
@@ -413,7 +402,6 @@ int main(int argc, char **argv)
     if (local_query_input_size > 0)
     {
         // Find nearest neighbors of the queries using HNSW.
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_query_input_size; ++i)
         {
             std::vector<float> &query = local_query_datamatrix[i].second;
@@ -435,12 +423,16 @@ int main(int argc, char **argv)
     double global_search_duration;
     MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
+    double global_activations;
+    MPI_Reduce(&activations, &global_activations, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (rank == 0)
     {
+        double global_activation_rate = global_activations / (query_input_size * world_size);
+        std::cout << "Activation rate: " << global_activation_rate << std::endl;
         std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         double correct = 0;
-        #pragma omp parallel for num_threads(p) reduction(+ : correct)
         for (int i = 0; i < query_input_size; i++)
         {
             if (global_results[i].id == i)
@@ -452,7 +444,7 @@ int main(int argc, char **argv)
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << std::endl;
 
-        write_to_output(output_filepath, input_size, world_size, global_sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall);
+        write_to_output(output_filepath, input_size, world_size, global_sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall, global_activation_rate);
     }
 
     MPI_Finalize();

@@ -9,7 +9,6 @@
 #include <sstream>
 #include <string>
 #include <mpi.h>
-#include <omp.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
 void read_txt(std::string filename, float *data, int input_size, int dimension)
@@ -41,11 +40,12 @@ void read_txt(std::string filename, float *data, int input_size, int dimension)
     }
 }
 
-void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, float index_time, float search_time, double recall) {
+void write_to_output(const std::string& filepath, int input_size, int world_size, int sample_size, int m, int branching_factor, 
+                    float index_time, float search_time, double recall, double activation_rate) {
     
-    std::ofstream file(filepath, std::ios::app);  // Open in append mode.
+    std::ofstream file(filepath);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filepath << " for appending.\n";
+        std::cerr << "Error: Could not open file " << filepath << " for writing.\n";
         return;
     }
 
@@ -56,7 +56,8 @@ void write_to_output(const std::string& filepath, int input_size, int world_size
          << branching_factor << ","
          << index_time << ","
          << search_time << ","
-         << recall << "\n";
+         << recall << ","
+         << activation_rate << "\n";
 
     file.close();
 }
@@ -96,7 +97,7 @@ float euclidean_distance(const cv::Mat &a, const cv::Mat &b)
 }
 
 void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<float> &meta_hnsw,
-                     int k_neighbors, std::vector<int> &center_to_group, int p)
+                     int k_neighbors, std::vector<int> &center_to_group)
 {
 
     int m = centers.rows;
@@ -106,19 +107,13 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
     int max_group_size = (m + w - 1) / w;
 
     // Initializes the first w centers, each to a unique group.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < std::min(w, m); ++i)
     {
         center_to_group[i] = i;
         group_sizes[i]++;
     }
 
-    omp_lock_t locks[w];
-    for (int i = 0; i < w; ++i)
-        omp_init_lock(&locks[i]);
-
     // Assign remaining centers to groups based on their neighbors.
-    #pragma omp parallel for num_threads(p)
     for (int i = w; i < m; ++i)
     {
         std::vector<int> scores(w, 0);
@@ -152,14 +147,12 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
             int best_group = best_groups.top().second;
             best_groups.pop();
 
-            omp_set_lock(&locks[best_group]);
             if (group_sizes[best_group] < max_group_size)
             {
                 center_to_group[i] = best_group;
                 group_sizes[best_group]++;
                 best_group_found = true;
             }
-            omp_unset_lock(&locks[best_group]);
 
             if (best_group_found)
                 break;
@@ -169,10 +162,7 @@ void greedy_grouping(const cv::Mat &centers, int w, hnswlib::HierarchicalNSW<flo
         {
             int best_group = std::min_element(group_sizes.begin(), group_sizes.end()) - group_sizes.begin();
             center_to_group[i] = best_group;
-
-            omp_set_lock(&locks[best_group]);
             group_sizes[best_group]++;
-            omp_unset_lock(&locks[best_group]);
         }
     }
 }
@@ -186,9 +176,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 11)
+    if (argc < 9)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <num_threads> <output_filepath>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <output_filepath>" << std::endl;
         return 1;
     }
 
@@ -201,8 +191,7 @@ int main(int argc, char **argv)
     int k = std::stoi(argv[6]);
     int M = std::stoi(argv[7]);
     int ef_construction = std::stoi(argv[8]);
-    int p = std::stoi(argv[9]);
-    std::string output_filepath = argv[10];
+    std::string output_filepath = argv[9];
 
     float *data;
     int local_input_size;
@@ -228,6 +217,8 @@ int main(int argc, char **argv)
         cv::Mat sampled_data;
         sample_input(data, input_size, dimension, sample_size, sampled_data);
 
+        std::cout << "Sampled data size: " << sample_size << " x " << dimension << std::endl;
+
         // Number of groups.
         int w = world_size;
 
@@ -247,13 +238,16 @@ int main(int argc, char **argv)
 
         meta_hnsw = new hnswlib::HierarchicalNSW<float>(&meta_space, m, M, ef_construction);
 
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < m; i++)
         {
             meta_hnsw->addPoint(centers.ptr<float>(i), i);
         }
 
-        greedy_grouping(centers, w, *meta_hnsw, 5, center_to_group, p);
+        std::cout << "Meta HNSW index built with " << m << " centers.\n";
+
+        greedy_grouping(centers, w, *meta_hnsw, 5, center_to_group);
+
+        std::cout << "Greedy grouping completed.\n";
 
         std::vector<std::vector<float *>> data_to_send(world_size);
         std::vector<std::vector<int>> data_ids_to_send(world_size);
@@ -274,7 +268,6 @@ int main(int argc, char **argv)
             float **data_ptrs = data_to_send[i].data();
             float *data_to_send_i = new float[data_size_to_send_i * dimension];
             
-            #pragma omp parallel for num_threads(p)
             for (int j = 0; j < data_size_to_send_i; ++j)
             {
                 std::memcpy(data_to_send_i + j * dimension, data_ptrs[j], dimension * sizeof(float));
@@ -291,7 +284,6 @@ int main(int argc, char **argv)
         local_data = new float[local_input_size * dimension];
         float **data_ptrs = data_to_send[0].data();
         
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i)
         {
             std::memcpy(local_data + i * dimension, data_ptrs[i], dimension * sizeof(float));
@@ -314,7 +306,6 @@ int main(int argc, char **argv)
     hnswlib::HierarchicalNSW<float> *local_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
 
     // Add data to hnsw index.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++)
     {
         local_hnsw->addPoint(local_data + i * dimension, local_data_ids[i]);
@@ -340,6 +331,8 @@ int main(int argc, char **argv)
     float *local_query_data;
     std::vector<int> local_query_indices;
 
+    double activation_rate = 0.0;
+
     MPI_Barrier(MPI_COMM_WORLD);
     double search_start = MPI_Wtime();
 
@@ -347,6 +340,7 @@ int main(int argc, char **argv)
     {
         std::vector<std::vector<int>> query_indices(world_size);
         std::vector<std::vector<float *>> query_data_to_send(world_size);
+        double activations = 0.0;
         for (int i = 0; i < query_input_size; ++i)
         {
             float *query = query_data + i * dimension;
@@ -366,6 +360,8 @@ int main(int argc, char **argv)
 
                 query_indices[group].push_back(i);
                 query_data_to_send[group].push_back(query);
+                visited_groups.push_back(group);
+                activations++;
             }
         }
         for (int i = 1; i < world_size; ++i)
@@ -376,7 +372,6 @@ int main(int argc, char **argv)
             {
                 float **query_ptrs = query_data_to_send[i].data();
                 float *query_data_to_send_i = new float[query_data_size_to_send_i * dimension];
-                #pragma omp parallel for num_threads(p)
                 for (int j = 0; j < query_data_size_to_send_i; ++j)
                 {
                     std::memcpy(query_data_to_send_i + j * dimension, query_ptrs[j], dimension * sizeof(float));
@@ -395,12 +390,16 @@ int main(int argc, char **argv)
 
             local_query_data = new float[local_query_input_size * dimension];
             float **query_ptrs = query_data_to_send[0].data();
-            #pragma omp parallel for num_threads(p)
             for (int j = 0; j < local_query_input_size; ++j)
             {
                 std::memcpy(local_query_data + j * dimension, query_ptrs[j], dimension * sizeof(float));
             }
         }
+
+        std::cout << "Query data distibution is completed.\n";
+
+        activation_rate = activations / (query_input_size * world_size);
+        std::cout << "Activation rate: " << activation_rate << std::endl;
     }
     else
     {
@@ -430,7 +429,6 @@ int main(int argc, char **argv)
     if (local_query_input_size > 0)
     {
         // Find nearest neighbors of the queries using HNSW.
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_query_input_size; ++i)
         {
             int query_index = local_query_indices[i];
@@ -457,7 +455,6 @@ int main(int argc, char **argv)
         std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         double correct = 0;
-        #pragma omp parallel for num_threads(p) reduction(+ : correct)
         for (int i = 0; i < query_input_size; i++)
         {
             if (global_results[i].id == i)
@@ -469,7 +466,7 @@ int main(int argc, char **argv)
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << std::endl;
 
-        write_to_output(output_filepath, input_size, world_size, sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall);
+        write_to_output(output_filepath, input_size, world_size, sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall, activation_rate);
     }
 
     MPI_Finalize();
