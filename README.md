@@ -67,12 +67,6 @@ mpic++ pyramid_hnsw_hnswlib_v2.1.cpp \
   -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs \
   -o pyramid_hnsw_hnswlib_v2.1.out
 ```
-
-mpic++ pyramid_hnsw_hnswlib_v1.1.cpp \
-  -I$SCRATCH/apps/opencv-4.9.0/include/opencv4 \
-  -L$SCRATCH/apps/opencv-4.9.0/lib64 \
-  -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs \
-  -o pyramid_hnsw_hnswlib_v1.1.out
 2. Run the code.
 ```bash
 mpirun -n <num_of_nodes> ./pyramid_hnsw_hnswlib_v2.1.out . <input_filepath> <input_size> <dimension> <sample_size> <m> <branching_factor> <M> <ef_construction> <output_filepath>
@@ -80,11 +74,10 @@ mpirun -n <num_of_nodes> ./pyramid_hnsw_hnswlib_v2.1.out . <input_filepath> <inp
 ```bash
 mpirun -n 4 ./pyramid_hnsw_hnswlib_v2.1.out ../data/iris_dataset/iris.data.txt 150 4 30 12 2 16 200 ../output/file.csv
 ```
-mpirun -n 512 ./pyramid_hnsw_hnswlib_v1.1.out ../data/glove/glove.512000.txt 512000 300 4096 1024 16 16 200 ./output/strong_scaling/raw/test.v1.500K.csv
 
-mpirun -n 512 ./pyramid_hnsw_hnswlib_v1.1.out ../data/glove/glove.512000.txt 512000 300 4096 1024 16 16 200 ./output/strong_scaling/raw/test.v2.500K.csv
+## Tests
 
-Setting up Glove dataset.
+### 1. Setting up Glove dataset.
 ```bash
 mkdir glove
 cd glove
@@ -93,11 +86,11 @@ unzip glove.840B.300d.zip
 rm glove.840B.300d.zip
 ```
 
-Installing hnswlib
+### 2.Installing hnswlib
 ```bash
 git clone https://github.com/nmslib/hnswlib.git
 ```
-Initialization
+### 3.Initialization
 ```bash
 module load GCC OpenMPI
 
@@ -105,12 +98,12 @@ export PKG_CONFIG_PATH=$SCRATCH/apps/opencv-4.9.0/lib64/pkgconfig:$PKG_CONFIG_PA
 export LD_LIBRARY_PATH=$SCRATCH/apps/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
 ```
 
-Interactive Allocation
+### 4.Interactive Allocation
 ```bash
 salloc --nodes=1 --ntasks-per-node=8 -t 00:05:00 --mem-per-cpu=5GB 
 ```
 
-OpenCV Installation
+### 5.OpenCV Installation
 ```bash
 mkdir -p $SCRATCH/apps/opencv_build
 cd $SCRATCH/apps/opencv_build
