@@ -31,8 +31,19 @@
 *.out
 *.app
 
+# Bin files
+*.bin
+
 # VS Code settings
 .vscode/
 
-# Big Datasets
-data/glove
+# Big datasets
+data/glove/glove_sample.txt
+data/glove/glove.*.txt
+
+# Raw output and log files
+**/raw/
+**/logs/
+
+# Python virtual environment
+venv/

@@ -6,7 +6,7 @@
 #include <sstream>
 #include <algorithm>
 #include <random>
-#include <omp.h>
+#include <string>
 #include <mpi.h>
 #include "../../hnswlib/hnswlib/hnswlib.h"
 
@@ -33,6 +33,27 @@ void read_txt(std::string filename, float* data, int input_size, int dimension) 
     }
 }
 
+void write_to_output(const std::string& filepath, int input_size, int world_size, float index_time, float search_time, double recall) {
+    
+    std::ofstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filepath << " for writing.\n";
+        return;
+    }
+
+    file << input_size << "," 
+         << world_size << ","
+         << -1 << ","
+         << -1 << ","
+         << world_size << ","
+         << index_time << ","
+         << search_time << ","
+         << recall << ","
+         << 1 << "\n";
+
+    file.close();
+}
+
 int main(int argc, char** argv) {
 
     MPI_Init(&argc, &argv);
@@ -41,8 +62,8 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 10) {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <M> <ef_construction> <num_threads> <randomize_input> <query_input_filepath> <query_input_size>" << std::endl;
+    if (argc < 7) {
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <input_size> <dimension> <M> <ef_construction> <randomize_input> <output_file>" << std::endl;
         return 1;
     }
     
@@ -52,10 +73,8 @@ int main(int argc, char** argv) {
     int dimension = std::stoi(argv[3]);
     int M = std::stoi(argv[4]);
     int ef_construction = std::stoi(argv[5]);
-    int p = std::stoi(argv[6]);
-    bool randomize_input = std::stoi(argv[7]);
-    std::string query_input_filepath = argv[8];
-    int query_input_size = std::stoi(argv[9]);
+    bool randomize_input = std::stoi(argv[6]);
+    std::string output_filepath = argv[7];
 
     float* data = new float[input_size * dimension];
 
@@ -72,16 +91,17 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     double hnsw_build_start = MPI_Wtime();
 
-    if (rank == 0) {       
+    if (rank == 0) {
         // Randomize input data if specified.
         if (randomize_input) {
             std::random_device rd;
             std::mt19937 g(rd());
             std::shuffle(data, data + input_size * dimension, g);
         }
+    }
 
+    if (rank == 0) {       
         // Copy local data for process 0.
-        #pragma omp parallel for num_threads(p)
         for (int i = 0; i < local_input_size; ++i) {
             for (int j = 0; j < dimension; ++j) {
                 local_data[i * dimension + j] = data[i * dimension + j];
@@ -112,7 +132,6 @@ int main(int argc, char** argv) {
     hnswlib::HierarchicalNSW<float>* alg_hnsw = new hnswlib::HierarchicalNSW<float>(&space, local_input_size, M, ef_construction);
 
     // Add data to hnsw index.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < local_input_size; i++) {
         alg_hnsw->addPoint(local_data + i * dimension, label_start + i);
     }
@@ -120,34 +139,31 @@ int main(int argc, char** argv) {
     double hnsw_build_end = MPI_Wtime();
     double local_hnsw_build_duration = hnsw_build_end - hnsw_build_start;
     double global_hnsw_build_duration;
-    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_hnsw_build_duration, &global_hnsw_build_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank == 0) {
         std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
     }
 
-    // Initialize brute-force index.
-    hnswlib::BruteforceSearch<float>* alg_brute = new hnswlib::BruteforceSearch<float>(&space, input_size);
+    int query_input_size = input_size;
+    float* query_data = nullptr;
     if (rank == 0) {
-        // Add data to brute-force index.
-        #pragma omp parallel for num_threads(p)
-        for (int i = 0; i < input_size; i++) {
-            alg_brute->addPoint(data + i * dimension, i);
-        }
+        query_data = data;
+    } else {
+        query_data = new float[query_input_size * dimension];
     }
-
-    float* query_data = new float[query_input_size * dimension];
-    read_txt(query_input_filepath, query_data, query_input_size, dimension);
+        
 
     MPI_Barrier(MPI_COMM_WORLD);
     double search_start = MPI_Wtime();
 
+    MPI_Bcast(query_data, query_input_size * dimension, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
     struct {
         float value;
         int id;
     } local_results[query_input_size], global_results[query_input_size];
 
     // Find nearest neighbors of the queries using HNSW.
-    #pragma omp parallel for num_threads(p)
     for (int i = 0; i < query_input_size; ++i) {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(query_data + i * dimension, 1);
         float distance = result.top().first;
@@ -163,24 +179,23 @@ int main(int argc, char** argv) {
     double search_end = MPI_Wtime();
     double local_search_duration = search_end - search_start;
     double global_search_duration;
-    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         // Calculate recall.
         double correct = 0;
-        #pragma omp parallel for num_threads(p) reduction(+:correct)
         for (int i = 0; i < query_input_size; i++) {
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_brute->searchKnn(query_data + i * dimension, 1);
-            int brute_force_id = result.top().second;
-            if (global_results[i].id == brute_force_id) {
+            if (global_results[i].id == i) {
                 correct++;
             }
         }
 
         float recall = correct / query_input_size;
         std::cout << "Recall: " << recall << "\n";
+
+        write_to_output(output_filepath, input_size, world_size, global_hnsw_build_duration, global_search_duration, recall);
     }
 
     delete[] local_data;
