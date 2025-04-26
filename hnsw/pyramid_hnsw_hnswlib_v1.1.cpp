@@ -66,20 +66,24 @@ void sample_input(float *datamatrix, int input_size, int dim,
                   int num_samples, cv::Mat &sampled_data)
 {
 
-    srand(time(0));
+    // Initialize random number generator.
+    std::random_device rd;
+    std::mt19937 rng(rd());
+
+    // Create a vector of indices and shuffle.
+    std::vector<int> indices(input_size);
+    std::iota(indices.begin(), indices.end(), 0);
+    std::shuffle(indices.begin(), indices.end(), rng);
+
+    // Initialize the output cv::Mat.
     sampled_data = cv::Mat(num_samples, dim, CV_32F);
 
-    std::vector<int> indices(input_size);
-    iota(indices.begin(), indices.end(), 0);
-    random_shuffle(indices.begin(), indices.end());
-
+    // Fill sampled_data.
     for (int i = 0; i < num_samples; ++i)
     {
         int idx = indices[i];
-        for (int j = 0; j < dim; ++j)
-        {
-            sampled_data.at<float>(i, j) = datamatrix[idx * dim + j];
-        }
+        // Use memcpy to copy the entire row at once.
+        std::memcpy(sampled_data.ptr<float>(i), datamatrix + idx * dim, dim * sizeof(float));
     }
 }
 
@@ -253,12 +257,23 @@ int main(int argc, char **argv)
         std::vector<std::vector<int>> data_ids_to_send(world_size);
         for (int i = 0; i < input_size; i++)
         {
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = meta_hnsw->searchKnn(data + i * dimension, 1);
-            int center = result.top().second;
-            int group = center_to_group[center];
+            std::priority_queue<std::pair<float, hnswlib::labeltype>> centers = meta_hnsw->searchKnn(data + i * dimension, k);
+            std::unordered_set<int> visited_groups;
+            while (!centers.empty())
+            {
+                int center = centers.top().second;
+                centers.pop();
+                int group = center_to_group[center];
 
-            data_ids_to_send[group].push_back(i);
-            data_to_send[group].push_back(data + i * dimension);
+                if (visited_groups.find(group) != visited_groups.end())
+                {
+                    continue;
+                }
+
+                data_ids_to_send[group].push_back(i);
+                data_to_send[group].push_back(data + i * dimension);
+                visited_groups.insert(group);
+            }
         }
 
         for (int i = 1; i < world_size; i++)

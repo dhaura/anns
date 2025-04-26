@@ -40,7 +40,7 @@ def plot_model_metrics(csv_path: str, save_path: str):
 def combine_csv_files(prefix: str, output_file: str = "m_center_sensitivity.csv"):
     # Updated header to include model name
     header = "model,input_size,num_procs,sample_size,m,branching_factor,index_time,search_time,recall,activation_rate"
-    postfixes = [str((2**i) * 256) for i in range(5)] 
+    postfixes = [str((2**i) * 128) for i in range(5)] 
 
     with open(output_file, "w") as outfile:
         outfile.write(header + "\n")

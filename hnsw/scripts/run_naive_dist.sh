@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --nodes=__NUM_OF_PROC_NODES__
 #SBATCH --ntasks-per-node=__CPUS_PER_NODE__
-#SBATCH --time=00:40:00
+#SBATCH --time=00:50:00
 #SBATCH --mem-per-cpu=5GB
 #SBATCH --job-name=__JOB_NAME__
 #SBATCH --output=__OUTPUT_LOG_FILE__

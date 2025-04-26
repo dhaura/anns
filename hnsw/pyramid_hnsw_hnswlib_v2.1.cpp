@@ -78,31 +78,30 @@ void write_to_output(const std::string& filepath, int input_size, int world_size
     file.close();
 }
 
-void sample_input(const std::vector<std::vector<float>> &datamatrix, int input_size, int dim,
-                  int num_samples, float *&sampled_data)
+std::unique_ptr<float[]> sample_input(const std::vector<std::vector<float>> &datamatrix, 
+    int input_size, int dim, int num_samples)
 {
 
-    // Initialize random number generator.
-    std::random_device rd;
-    std::mt19937 rng(rd());
-
-    // Create a vector to store the indices.
-    std::vector<int> indices(input_size);
-    std::iota(indices.begin(), indices.end(), 0); // Fill indices from 0 to input_size - 1.
-
-    // Shuffle the indices randomly.
-    std::shuffle(indices.begin(), indices.end(), rng);
-
-    // Allocate memory for the 1D float array.
-    sampled_data = new float[num_samples * dim];
-
-    // Fill the sampled_data array.
-    for (int i = 0; i < num_samples; ++i)
-    {
-        int idx = indices[i]; // Get the index of the sampled row.
-        // Copy the entire row from datamatrix[idx] directly to sampled_data.
-        std::memcpy(sampled_data + i * dim, datamatrix[idx].data(), dim * sizeof(float));
-    }
+     // Initialize random number generator.
+     std::random_device rd;
+     std::mt19937 rng(rd());
+ 
+     // Create a vector of indices and shuffle.
+     std::vector<int> indices(input_size);
+     std::iota(indices.begin(), indices.end(), 0);
+     std::shuffle(indices.begin(), indices.end(), rng);
+ 
+     // Allocate memory safely.
+     std::unique_ptr<float[]> sampled_data(new float[num_samples * dim]);
+ 
+     // Fill sampled_data.
+     for (int i = 0; i < num_samples; ++i)
+     {
+         int idx = indices[i];
+         std::memcpy(sampled_data.get() + i * dim, datamatrix[idx].data(), dim * sizeof(float));
+     }
+ 
+     return sampled_data;
 }
 
 void greedy_grouping(const std::vector<float> &centers, int w, int m, int dim, hnswlib::HierarchicalNSW<float> &meta_hnsw,
@@ -187,7 +186,7 @@ double distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &loca
     {
         std::priority_queue<std::pair<float, hnswlib::labeltype>> centers = meta_hnsw.searchKnn(datamatrix[i].data(), k);
 
-        std::vector<int> visited_groups;
+        std::unordered_set<int> visited_groups;
         int label = label_offset + i;
         while (!centers.empty())
         {
@@ -195,7 +194,7 @@ double distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &loca
             centers.pop();
             int group = center_to_group[center];
 
-            if (std::find(visited_groups.begin(), visited_groups.end(), group) != visited_groups.end())
+            if (visited_groups.find(group) != visited_groups.end())
             {
                 continue;
             }
@@ -203,7 +202,7 @@ double distribute_data_matrix(Float2DVector &datamatrix, Float2DPairVector &loca
             // Vector to be sent to a process -> a set of vectors of (label + data vector).
             data_to_send[group].push_back(static_cast<float>(label));
             data_to_send[group].insert(data_to_send[group].end(), datamatrix[i].begin(), datamatrix[i].end());
-            visited_groups.push_back(group);
+            visited_groups.insert(group);
             activations++;
         }
     }
@@ -285,13 +284,15 @@ int main(int argc, char **argv)
     double hnsw_build_start = MPI_Wtime();
 
     int sample_size = global_sample_size / world_size;
-    float *sampled_data = new float[sample_size * dimension];
-    sample_input(datamatrix, chunk_size, dimension, sample_size, sampled_data);
+    std::unique_ptr<float[]> sampled_data = sample_input(datamatrix, chunk_size, dimension, sample_size);
 
-    float *global_sampled_data = new float[global_sample_size * dimension];
-    MPI_Gather(sampled_data, sample_size * dimension, MPI_FLOAT,
-               global_sampled_data, sample_size * dimension, MPI_FLOAT,
-               0, MPI_COMM_WORLD);
+    std::unique_ptr<float[]> global_sampled_data;
+    if (rank == 0) {
+        global_sampled_data = std::make_unique<float[]>(global_sample_size * dimension);
+    }
+    MPI_Gather(sampled_data.get(), sample_size * dimension, MPI_FLOAT,
+            global_sampled_data.get(), sample_size * dimension, MPI_FLOAT,
+            0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {
@@ -303,7 +304,7 @@ int main(int argc, char **argv)
 
     if (rank == 0)
     {
-        cv::Mat sampled_data(global_sample_size, dimension, CV_32F, global_sampled_data);
+        cv::Mat sampled_data_mat(global_sample_size, dimension, CV_32F, global_sampled_data.get());
 
         int w = world_size;
 
@@ -317,7 +318,7 @@ int main(int argc, char **argv)
         int flags = cv::KMEANS_PP_CENTERS;
 
         // Run kmeans for m centers.
-        cv::kmeans(sampled_data, m, labels, criteria, attempts, flags, centers);
+        cv::kmeans(sampled_data_mat, m, labels, criteria, attempts, flags, centers);
 
         for (int i = 0; i < m; ++i)
         {
@@ -350,7 +351,7 @@ int main(int argc, char **argv)
     }
 
     Float2DPairVector local_datamatrix;
-    double _ = distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, 1, input_size, dimension, rank, world_size);
+    double _ = distribute_data_matrix(datamatrix, local_datamatrix, *meta_hnsw, center_to_group, k, input_size, dimension, rank, world_size);
 
     int local_input_size = local_datamatrix.size();
 

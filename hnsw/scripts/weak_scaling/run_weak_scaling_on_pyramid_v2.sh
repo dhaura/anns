@@ -3,15 +3,15 @@
 INPUT_DIR="../../../data/glove"
 OUTPUT_DIR="../../output/weak_scaling"
 JOB_NAME_PREFIX="weak_scaling_pyramid_v2"
-INIT_INPUT_SIZE=4000
-SAMPLE_SIZE=2048
-M_CENTERS=512
-BRANCHING_FACTOR=16
+INIT_INPUT_SIZE=2000
+INIT_SAMPLE_SIZE=256
+INIT_M_CENTERS=4
+BRANCHING_FACTOR=8
 M=16
 EF_CONSTRUCTION=200
 DIM=300
 
-for i in {6..9}; do
+for i in {0..8}; do
     NUM_OF_PROCS=$((2**i))
     if [ $NUM_OF_PROCS -le 32 ]; then
         NUM_OF_PROC_NODES=1
@@ -22,6 +22,9 @@ for i in {6..9}; do
     fi
 
     INPUT_SIZE=$((NUM_OF_PROCS * INIT_INPUT_SIZE))
+    FACTOR=$((2**i))
+    SAMPLE_SIZE=$((INIT_SAMPLE_SIZE * FACTOR))
+    M_CENTERS=$((INIT_M_CENTERS * FACTOR))
 
     JOB_NAME="${JOB_NAME_PREFIX}_${NUM_OF_PROCS}"
     INPUT_FILE="${INPUT_DIR}/glove.${INPUT_SIZE}.txt"

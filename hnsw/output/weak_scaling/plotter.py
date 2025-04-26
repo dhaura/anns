@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
 
 def plot_model_metrics(csv_path: str, save_path: str):
     # Load the CSV.
@@ -24,10 +25,10 @@ def plot_model_metrics(csv_path: str, save_path: str):
         for model in df["model"].unique():
             model_data = df[df["model"] == model]
             grouped = model_data.groupby("num_procs")[metric].mean().reset_index()
-            ax.plot(grouped["num_procs"], grouped[metric], marker='o', label=model)
+            ax.plot(np.log2(grouped["num_procs"]), grouped[metric], marker='o', label=model)
 
         ax.set_title(f"Number of Processors vs {y_labels[metric]}")
-        ax.set_xlabel("Number of Processes")
+        ax.set_xlabel("Number of Processes (Log Scale)")
         ax.set_ylabel(y_labels[metric])
         ax.grid(True)
         ax.legend()

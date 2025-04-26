@@ -3,15 +3,15 @@
 INPUT_DIR="../../../data/glove"
 OUTPUT_DIR="../../output/strong_scaling"
 JOB_NAME_PREFIX="strong_scaling_pyramid_v2"
-INPUT_SIZE=1024000
+INPUT_SIZE=512000
 SAMPLE_SIZE=10240
 M_CENTERS=512
-BRANCHING_FACTOR=16
+BRANCHING_FACTOR=8
 M=16
 EF_CONSTRUCTION=200
 DIM=300
 
-for i in {0..9}; do
+for i in {0..8}; do
     NUM_OF_PROCS=$((2**i))
     if [ $NUM_OF_PROCS -le 32 ]; then
         NUM_OF_PROC_NODES=1

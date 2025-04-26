@@ -86,7 +86,12 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         read_txt(input_filepath, data, input_size, dimension);
+    }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    double hnsw_build_start = MPI_Wtime();
+
+    if (rank == 0) {
         // Randomize input data if specified.
         if (randomize_input) {
             std::random_device rd;
@@ -94,10 +99,6 @@ int main(int argc, char** argv) {
             std::shuffle(data, data + input_size * dimension, g);
         }
     }
-    MPI_Bcast(data, input_size * dimension, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    double hnsw_build_start = MPI_Wtime();
 
     if (rank == 0) {       
         // Copy local data for process 0.
@@ -144,11 +145,19 @@ int main(int argc, char** argv) {
     }
 
     int query_input_size = input_size;
-    float* query_data = data;
+    float* query_data = nullptr;
+    if (rank == 0) {
+        query_data = data;
+    } else {
+        query_data = new float[query_input_size * dimension];
+    }
+        
 
     MPI_Barrier(MPI_COMM_WORLD);
     double search_start = MPI_Wtime();
 
+    MPI_Bcast(query_data, query_input_size * dimension, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    
     struct {
         float value;
         int id;

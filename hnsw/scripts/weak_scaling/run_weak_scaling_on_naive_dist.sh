@@ -3,13 +3,13 @@
 INPUT_DIR="../../../data/glove"
 OUTPUT_DIR="../../output/weak_scaling"
 JOB_NAME_PREFIX="weak_scaling_naive_dist"
-INIT_INPUT_SIZE=4000
+INIT_INPUT_SIZE=2000
 M=16
 EF_CONSTRUCTION=200
 DIM=300
-RANDOMIZE_INPUT=0
+RANDOMIZE_INPUT=1
 
-for i in {0..9}; do
+for i in {0..8}; do
     NUM_OF_PROCS=$((2**i))
     if [ $NUM_OF_PROCS -le 32 ]; then
         NUM_OF_PROC_NODES=1

@@ -3,7 +3,7 @@
 INPUT_DIR="../../../data/glove"
 OUTPUT_DIR="../../output/branching_factor_sensitivity"
 JOB_NAME_PREFIX="branching_factor_sensitivity_pyramid_v2"
-INPUT_SIZE=1024000
+INPUT_SIZE=256000
 SAMPLE_SIZE=10240
 M_CENTERS=512
 INIT_BRANCHING_FACTOR=1

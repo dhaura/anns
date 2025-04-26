@@ -3,13 +3,13 @@
 INPUT_DIR="../../../data/glove"
 OUTPUT_DIR="../../output/strong_scaling"
 JOB_NAME_PREFIX="strong_scaling_naive_dist"
-INPUT_SIZE=1024000
+INPUT_SIZE=512000
 M=16
 EF_CONSTRUCTION=200
 DIM=300
-RANDOMIZE_INPUT=0
+RANDOMIZE_INPUT=1
 
-for i in {0..9}; do
+for i in {0..8}; do
     NUM_OF_PROCS=$((2**i))
     if [ $NUM_OF_PROCS -le 32 ]; then
         NUM_OF_PROC_NODES=1
