@@ -86,11 +86,11 @@ unzip glove.840B.300d.zip
 rm glove.840B.300d.zip
 ```
 
-### 2.Installing hnswlib
+### 2. Installing hnswlib
 ```bash
 git clone https://github.com/nmslib/hnswlib.git
 ```
-### 3.Initialization
+### 3. Initialization
 ```bash
 module load GCC OpenMPI
 
@@ -98,7 +98,7 @@ export PKG_CONFIG_PATH=$SCRATCH/apps/opencv-4.9.0/lib64/pkgconfig:$PKG_CONFIG_PA
 export LD_LIBRARY_PATH=$SCRATCH/apps/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
 ```
 
-### 4.Interactive Allocation
+### 4. Interactive Allocation
 ```bash
 salloc --nodes=1 --ntasks-per-node=8 -t 00:05:00 --mem-per-cpu=5GB 
 ```

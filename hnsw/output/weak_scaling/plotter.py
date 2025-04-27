@@ -41,7 +41,7 @@ def plot_model_metrics(csv_path: str, save_path: str):
 def combine_csv_files(prefix: str, output_file: str = "weak_scaling.csv"):
     # Updated header to include model name
     header = "model,input_size,num_procs,sample_size,m,branching_factor,index_time,search_time,recall,activation_rate"
-    postfixes = [str(2**i) for i in range(9)]  # 1 to 512 doubling
+    postfixes = [str(2**i) for i in range(10)]
     variants = [("naive_dist", "naive_dist"), ("pyramid_v1", "pyramid_v1"), ("pyramid_v2", "pyramid_v2")]
 
     with open(output_file, "w") as outfile:
