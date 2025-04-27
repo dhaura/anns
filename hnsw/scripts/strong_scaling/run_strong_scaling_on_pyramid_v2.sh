@@ -11,7 +11,7 @@ M=16
 EF_CONSTRUCTION=200
 DIM=300
 
-for i in {0..8}; do
+for i in {0..9}; do
     NUM_OF_PROCS=$((2**i))
     if [ $NUM_OF_PROCS -le 32 ]; then
         NUM_OF_PROC_NODES=1
