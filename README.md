@@ -132,3 +132,75 @@ cmake ../opencv \
 make -j$(nproc)
 make install
 ```
+
+# Sparse Pyramid HNSW
+
+## 1. Prerequisites
+### 1.1 OpenCV Installation
+```bash
+mkdir -p $SCRATCH/apps/opencv_build
+cd $SCRATCH/apps/opencv_build
+
+git clone https://github.com/opencv/opencv.git
+git clone https://github.com/opencv/opencv_contrib.git
+cd opencv
+git checkout 4.9.0
+cd ../opencv_contrib
+git checkout 4.9.0
+
+mkdir -p ../build && cd ../build
+cmake ../opencv \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$SCRATCH/modules/opencv-4.9.0 \
+  -DOPENCV_EXTRA_MODULES_PATH=../opencv_contrib/modules \
+  -DBUILD_opencv_python3=OFF \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_TESTS=OFF \
+  -DWITH_OPENMP=ON \
+  -DWITH_TBB=ON \
+  -DWITH_EIGEN=ON \
+  -DBUILD_SHARED_LIBS=ON \
+  -DCMAKE_CXX_STANDARD=17 \
+  -DOPENCV_GENERATE_PKGCONFIG=ON
+
+make -j$(nproc)
+make install
+```
+
+### 1.2 Installing hnswlib
+```bash
+cd hnsw/sparse_pyrmid
+git clone https://github.com/nmslib/hnswlib.git
+```
+
+### 1.3 Export Env Variables
+```bash
+export PKG_CONFIG_PATH=$SCRATCH/modules/opencv-4.9.0/lib64/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=$SCRATCH/modules/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
+export HNSWLIB_ROOT=$SCRATCH/benchmarks/SpKNN/anns/hnsw/sparse_pyramid/hnswlib
+```
+
+## 2. Build 
+### 2.1 Compilation
+```bash
+mkdir build && cd build
+cmake ..
+make
+```
+
+## 3. Run
+### 3.1 Allocate Resources
+```bash
+salloc --nodes 1 --tasks-per-node 4 --time 00:30:00 --mem 10GB --constraint cpu --qos interactive
+```
+
+### 3.2 Export Env Varaibles
+```bash
+export PKG_CONFIG_PATH=$SCRATCH/modules/opencv-4.9.0/lib64/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=$SCRATCH/modules/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
+```
+
+### 3.3 Run
+```bash
+srun -n 4 ./sparse_pyramid $SCRATCH/datasets/SpKNN/grassRMA/base_small.csr 200 12 2 16 200 ../../output/file.csv
+```

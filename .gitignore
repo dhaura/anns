@@ -47,3 +47,6 @@ data/glove/glove.*.txt
 
 # Python virtual environment
 venv/
+
+# CMake build directories
+build/  
