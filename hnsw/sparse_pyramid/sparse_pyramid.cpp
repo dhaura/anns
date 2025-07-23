@@ -62,7 +62,7 @@ CSRMatrix *read_csr(const std::string &filename, int rank, int world_size)
     return new CSRMatrix(local_n_rows, n_cols, local_nnz, n_rows, nnz, local_indptr.data(), local_indices.data(), local_data.data());
 }
 
-static void get_gt(const std::string gt_path, uint32_t *&I)
+static void get_gt(const std::string gt_path, uint32_t *&I, uint32_t &n, uint32_t &d)
 {
     std::ifstream infile(gt_path, std::ios::binary);
 
@@ -571,12 +571,17 @@ int main(int argc, char **argv)
     CSRMatrix *local_query_datamatrix;
     double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k, query_input_size, dim, rank, world_size);
 
+    uint32_t *I = nullptr;
+    uint32_t n, d;
     if (rank == 0)
     {
-        std::cout << "Query data distibution is completed.\n";
+        get_gt(gt_filepath, I, n, d);
     }
 
-    std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> result = local_hnsw->searchKnn(0, 2, local_query_datamatrix);
+    MPI_Bcast(&n, 1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&d, 1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
+
+    std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> result = local_hnsw->searchKnn(0, d, local_query_datamatrix);
 
     std::cout << "Rank: " << rank << " search for local index: 0 actual label: " << local_query_labels[0] << "\n";
     while (!result.empty())
@@ -629,8 +634,6 @@ int main(int argc, char **argv)
 
     if (rank == 0)
     {
-        uint32_t *I = nullptr;
-        get_gt(gt_filepath, I);
         // double global_activation_rate = global_activations / (query_input_size * world_size);
         // std::cout << "Activation rate: " << global_activation_rate << std::endl;
         // std::cout << "Time taken for search: " << global_search_duration << " seconds\n";

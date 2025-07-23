@@ -202,5 +202,5 @@ export LD_LIBRARY_PATH=$SCRATCH/modules/opencv-4.9.0/lib64:$LD_LIBRARY_PATH
 
 ### 3.3 Run
 ```bash
-srun -n 4 ./sparse_pyramid $SCRATCH/datasets/SpKNN/grassRMA/base_small.csr 200 12 2 16 200 $SCRATCH/datasets/SpKNN/grassRMA/queries.dev.csr
+srun -n 4 ./sparse_pyramid $SCRATCH/datasets/SpKNN/grassRMA/base_small.csr 200 12 2 16 200 $SCRATCH/datasets/SpKNN/grassRMA/queries.dev.csr $SCRATCH/datasets/SpKNN/grassRMA/base_small.dev.gt
 ```
