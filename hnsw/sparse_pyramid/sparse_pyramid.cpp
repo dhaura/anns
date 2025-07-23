@@ -62,6 +62,22 @@ CSRMatrix *read_csr(const std::string &filename, int rank, int world_size)
     return new CSRMatrix(local_n_rows, n_cols, local_nnz, n_rows, nnz, local_indptr.data(), local_indices.data(), local_data.data());
 }
 
+static void get_gt(const std::string gt_path, uint32_t *&I)
+{
+    std::ifstream infile(gt_path, std::ios::binary);
+
+    if (infile.fail())
+    {
+        std::cerr << std::string("Failed to open file ") + gt_path;
+        exit(1);
+    }
+    infile.read((char *)&n, sizeof(uint32_t));
+    infile.read((char *)&d, sizeof(uint32_t));
+    I = new uint32_t[n * d];
+    infile.read((char *)I, n * d * sizeof(uint32_t));
+    infile.close();
+}
+
 void write_to_output(const std::string &filepath, int input_size, int world_size, int sample_size, int m, int branching_factor,
                      float index_time, float search_time, double recall, double activation_rate)
 {
@@ -328,7 +344,6 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
                 continue;
             }
 
-
             labels_to_send[group].push_back(label);
             indptr_to_send[group].push_back(current_indptr[group]);
             for (int j = start; j < end; ++j)
@@ -377,7 +392,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     MPI_Alltoallv(send_indptr_buffer.data(), send_label_counts.data(), send_label_offsets.data(), MPI_INT64_T,
                   recv_indptr_buffer.data(), recv_label_counts.data(), recv_label_offsets.data(), MPI_INT64_T,
                   MPI_COMM_WORLD);
-    
+
     std::vector<int32_t> send_indices_buffer;
     std::vector<float> send_data_buffer;
     std::vector<int> send_data_counts(world_size), recv_data_counts(world_size);
@@ -416,7 +431,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     std::vector<int64_t> final_indptr(total_recv_label_count + 1, 0);
     int indptr_index_offset = 0;
     int dataptr_offset = 0;
-    int recv_count_index = 0; 
+    int recv_count_index = 0;
 
     for (int i = 0; i < recv_indptr_buffer.size(); ++i)
     {
@@ -448,9 +463,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 8)
+    if (argc < 9)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <output_filepath>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <query_filepath> <gt_filepath>" << std::endl;
         return 1;
     }
 
@@ -461,7 +476,8 @@ int main(int argc, char **argv)
     int k = std::stoi(argv[4]);
     int M = std::stoi(argv[5]);
     int ef_construction = std::stoi(argv[6]);
-    std::string output_filepath = argv[7];
+    std::string query_filepath = argv[7];
+    std::string gt_filepath = argv[8];
 
     CSRMatrix *datamatrix = read_csr(input_filepath, rank, world_size);
 
@@ -522,9 +538,10 @@ int main(int argc, char **argv)
     sparse_hnswlib::HierarchicalNSW<float> *local_hnsw =
         new sparse_hnswlib::HierarchicalNSW<float>(&space, local_datamatrix, local_input_size, M, ef_construction);
 
-        if (rank == 0) {
-            std::cout << "Local HNSW index initialized with " << local_input_size << " samples." << std::endl;
-        }
+    if (rank == 0)
+    {
+        std::cout << "Local HNSW index initialized with " << local_input_size << " samples." << std::endl;
+    }
 
     // Add data to hnsw index.
     for (int i = 0; i < local_input_size; i++)
@@ -546,14 +563,28 @@ int main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
     double search_start = MPI_Wtime();
 
-    // int query_input_size = input_size;
-    // Float2DPairVector local_query_datamatrix;
-    // double activations = distribute_data_matrix(datamatrix, local_query_datamatrix, *meta_hnsw, sample_to_group, k, query_input_size, dimension, rank, world_size);
+    CSRMatrix *query_datamatrix = read_csr(query_filepath, rank, world_size);
 
-    // if (rank == 0)
-    // {
-    //     std::cout << "Query data distibution is completed.\n";
-    // }
+    int query_input_size = query_datamatrix->nrow;
+
+    std::vector<int> local_query_labels;
+    CSRMatrix *local_query_datamatrix;
+    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k, query_input_size, dim, rank, world_size);
+
+    if (rank == 0)
+    {
+        std::cout << "Query data distibution is completed.\n";
+    }
+
+    std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> result = local_hnsw->searchKnn(0, 2, local_query_datamatrix);
+
+    std::cout << "Rank: " << rank << " search for local index: 0 actual label: " << local_query_labels[0] << "\n";
+    while (!result.empty())
+    {
+        std::cout << "Result: Local Index: " << result.top().second << " Label: " << local_query_labels[result.top().second] << ", Distance: " << result.top().first << "\n";
+        result.pop();
+    }
+    std::cout << std::endl;
 
     // int local_query_input_size = local_query_datamatrix.size();
 
@@ -596,26 +627,28 @@ int main(int argc, char **argv)
     // double global_activations;
     // MPI_Reduce(&activations, &global_activations, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // if (rank == 0)
-    // {
-    //     double global_activation_rate = global_activations / (query_input_size * world_size);
-    //     std::cout << "Activation rate: " << global_activation_rate << std::endl;
-    //     std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
+    if (rank == 0)
+    {
+        uint32_t *I = nullptr;
+        get_gt(gt_filepath, I);
+        // double global_activation_rate = global_activations / (query_input_size * world_size);
+        // std::cout << "Activation rate: " << global_activation_rate << std::endl;
+        // std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
-    //     double correct = 0;
-    //     for (int i = 0; i < query_input_size; i++)
-    //     {
-    //         if (global_results[i].id == i)
-    //         {
-    //             correct++;
-    //         }
-    //     }
+        // double correct = 0;
+        // for (int i = 0; i < query_input_size; i++)
+        // {
+        //     if (global_results[i].id == i)
+        //     {
+        //         correct++;
+        //     }
+        // }
 
-    //     float recall = correct / query_input_size;
-    //     std::cout << "Recall: " << recall << std::endl;
+        // float recall = correct / query_input_size;
+        // std::cout << "Recall: " << recall << std::endl;
 
-    //     write_to_output(output_filepath, input_size, world_size, global_sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall, global_activation_rate);
-    // }
+        // write_to_output(output_filepath, input_size, world_size, global_sample_size, m, k, global_hnsw_build_duration, global_search_duration, recall, global_activation_rate);
+    }
 
     MPI_Finalize();
 
