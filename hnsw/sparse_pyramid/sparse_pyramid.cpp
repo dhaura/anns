@@ -448,7 +448,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     dataptr_offset += recv_data_counts[recv_count_index];
     final_indptr[total_recv_label_count] = recv_data_buffer.size();
 
-    // Buid final local datamatrix.
+    // Build final local datamatrix.
     *local_datamatrix = new CSRMatrix(total_recv_label_count, dim, total_recv_data_count, datamatrix->global_nrow, datamatrix->global_nnz,
                                       final_indptr.data(), recv_indices_buffer.data(), recv_data_buffer.data());
     return activations;
@@ -560,16 +560,7 @@ int main(int argc, char **argv)
         std::cout << "Time taken to build HNSW index: " << global_hnsw_build_duration << " seconds\n";
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
-    double search_start = MPI_Wtime();
-
     CSRMatrix *query_datamatrix = read_csr(query_filepath, rank, world_size);
-
-    int query_input_size = query_datamatrix->nrow;
-
-    std::vector<int> local_query_labels;
-    CSRMatrix *local_query_datamatrix;
-    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k, query_input_size, dim, rank, world_size);
 
     uint32_t *I = nullptr;
     uint32_t n, d;
@@ -581,17 +572,16 @@ int main(int argc, char **argv)
     MPI_Bcast(&n, 1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&d, 1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
 
-    std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> result = local_hnsw->searchKnn(0, d, local_query_datamatrix);
+    MPI_Barrier(MPI_COMM_WORLD);
+    double search_start = MPI_Wtime();
 
-    std::cout << "Rank: " << rank << " search for local index: 0 actual label: " << local_query_labels[0] << "\n";
-    while (!result.empty())
-    {
-        std::cout << "Result: Local Index: " << result.top().second << " Label: " << local_query_labels[result.top().second] << ", Distance: " << result.top().first << "\n";
-        result.pop();
-    }
-    std::cout << std::endl;
+    int query_input_size = query_datamatrix->nrow;
 
-    // int local_query_input_size = local_query_datamatrix.size();
+    std::vector<int> local_query_labels;
+    CSRMatrix *local_query_datamatrix;
+    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k, query_input_size, dim, rank, world_size);
+
+    int local_query_input_size = local_query_datamatrix->nrow;
 
     // struct
     // {
@@ -605,38 +595,45 @@ int main(int argc, char **argv)
     //     local_results[i].value = std::numeric_limits<float>::max();
     // }
 
-    // if (local_query_input_size > 0)
-    // {
-    //     // Find nearest neighbors of the queries using HNSW.
-    //     for (int i = 0; i < local_query_input_size; ++i)
-    //     {
-    //         std::vector<float> &query = local_query_datamatrix[i].second;
-    //         std::priority_queue<std::pair<float, hnswlib::labeltype>> results = local_hnsw->searchKnn(query.data(), 1);
-    //         float distance = results.top().first;
-    //         int label = results.top().second;
+    std::vector<int> local_result_ids (local_query_input_size * d, -1);
+    std::vector<float> local_result_distances (local_query_input_size * d, std::numeric_limits<float>::max());
 
-    //         int query_label = local_query_datamatrix[i].first;
-    //         local_results[query_label].value = distance;
-    //         local_results[query_label].id = label;
-    //     }
-    // }
+    if (local_query_input_size > 0)
+    {
+        // Find nearest neighbors of the queries using HNSW.
+        for (int i = 0; i < local_query_input_size; ++i)
+        {
+            std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> results = local_hnsw->searchKnn(i, d, local_query_datamatrix);
+            
+            int result_index = 0;
+            while (!results.empty())
+            {
+                float distance = results.top().first;
+                int label = local_labels[results.top().second];
+                results.pop();
+
+                local_result_ids[i + result_index] = label;
+                local_result_distances[i + result_index] = distance;
+            }
+        }
+    }
 
     // // Gather results from all processes.
     // MPI_Reduce(local_results, global_results, query_input_size, MPI_FLOAT_INT, MPI_MINLOC, 0, MPI_COMM_WORLD);
 
-    // double search_end = MPI_Wtime();
-    // double local_search_duration = search_end - search_start;
-    // double global_search_duration;
-    // MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    double search_end = MPI_Wtime();
+    double local_search_duration = search_end - search_start;
+    double global_search_duration;
+    MPI_Reduce(&local_search_duration, &global_search_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
-    // double global_activations;
-    // MPI_Reduce(&activations, &global_activations, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    double global_activations;
+    MPI_Reduce(&activations, &global_activations, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {
-        // double global_activation_rate = global_activations / (query_input_size * world_size);
-        // std::cout << "Activation rate: " << global_activation_rate << std::endl;
-        // std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
+        double global_activation_rate = global_activations / (query_input_size * world_size);
+        std::cout << "Activation rate: " << global_activation_rate << std::endl;
+        std::cout << "Time taken for search: " << global_search_duration << " seconds\n";
 
         // double correct = 0;
         // for (int i = 0; i < query_input_size; i++)
