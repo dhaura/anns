@@ -293,22 +293,6 @@ void greedy_grouping(CSRMatrix *sampled_matrix, int w, int sample_size, int dim,
             group_sizes[best_group]++;
         }
     }
-
-    // std::cout << "Print group sizes:\n";
-    // for (int i = 0; i < w; ++i)
-    // {
-    //     std::cout << "Group " << i << ": " << group_sizes[i] << " samples.\n";
-    //     std::cout << "samples of group " << i << ": ";
-    //     for (int j = 0; j < sample_size; ++j)
-    //     {
-    //         if (sample_to_group[j] == i)
-    //         {
-    //             std::cout << j << " ";
-    //         }
-    //     }
-    //     std::cout << "\n";
-    // }
-    // std::cout << "Greedy grouping completed.\n";
 }
 
 double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatrix, std::vector<int> *recv_label_buffer, sparse_hnswlib::HierarchicalNSW<float> &meta_hnsw,
@@ -323,6 +307,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
 
     std::vector<int64_t> current_indptr(world_size, 0);
 
+    // Iterate through each element in the datamatrix and find which processors should handle them.
     double activations = 0.0;
     for (int i = 0; i < datamatrix->nrow; ++i)
     {
@@ -385,6 +370,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     recv_label_buffer->resize(total_recv_label_count);
     std::vector<int64_t> recv_indptr_buffer(total_recv_label_count);
 
+    // Distribute the label and indptr buffers across all processes.
     MPI_Alltoallv(send_label_buffer.data(), send_label_counts.data(), send_label_offsets.data(), MPI_INT,
                   recv_label_buffer->data(), recv_label_counts.data(), recv_label_offsets.data(), MPI_INT,
                   MPI_COMM_WORLD);
@@ -419,6 +405,7 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     std::vector<int32_t> recv_indices_buffer(total_recv_data_count);
     std::vector<float> recv_data_buffer(total_recv_data_count);
 
+    // Distribute the indices and data buffers across all processes.
     MPI_Alltoallv(send_indices_buffer.data(), send_data_counts.data(), send_data_offsets.data(), MPI_INT32_T,
                   recv_indices_buffer.data(), recv_data_counts.data(), recv_data_offsets.data(), MPI_INT32_T,
                   MPI_COMM_WORLD);
@@ -496,10 +483,8 @@ void distribute_local_results(std::vector<std::vector<int>> &query_labels_to_sen
         local_flat_query_labels.insert(local_flat_query_labels.end(), query_labels_to_send[i].begin(), query_labels_to_send[i].end());
     }
 
-    std::cout << "Rank: " << rank << " Sending " << local_result_flat_ids.size() << " ids, " << local_result_flat_dists.size() << " distances, and "
-              << local_flat_query_labels.size() << " labels." << std::endl;
 
-    // Send results back to relevant owner processors.
+    // Gather the sizes of results and labels to be received from each process.
     MPI_Alltoall(query_label_send_counts.data(), 1, MPI_INT, query_label_recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
     MPI_Alltoall(result_send_counts.data(), 1, MPI_INT, result_recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
 
@@ -513,20 +498,16 @@ void distribute_local_results(std::vector<std::vector<int>> &query_labels_to_sen
     result_recv_ids->resize(std::accumulate(result_recv_counts.begin(), result_recv_counts.end(), 0));
     result_recv_dists->resize(result_recv_ids->size());
 
+    // Send results back to relevant owner processors.
     MPI_Alltoallv(local_flat_query_labels.data(), query_label_send_counts.data(), query_label_send_offsets.data(), MPI_INT,
                   result_recv_labels->data(), query_label_recv_counts.data(), query_label_recv_offsets.data(), MPI_INT,
                   MPI_COMM_WORLD);
-
-    std::cout << "Rank: " << rank << " Received " << result_recv_labels->size() << " query labels." << std::endl;
 
     MPI_Alltoallv(local_result_flat_ids.data(), result_send_counts.data(), result_send_offsets.data(), MPI_INT,
                   result_recv_ids->data(), result_recv_counts.data(), result_recv_offsets.data(), MPI_INT, MPI_COMM_WORLD);
 
     MPI_Alltoallv(local_result_flat_dists.data(), result_send_counts.data(), result_send_offsets.data(), MPI_FLOAT,
                   result_recv_dists->data(), result_recv_counts.data(), result_recv_offsets.data(), MPI_FLOAT, MPI_COMM_WORLD);
-
-    std::cout << "Rank: " << rank << " Received " << result_recv_ids->size() << " ids, " << result_recv_dists->size() << " distances, and "
-              << result_recv_labels->size() << " labels." << std::endl;
 }
 
 void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> *query_results, 
@@ -534,13 +515,21 @@ void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pa
                              std::vector<int> &result_recv_ids,
                              std::vector<float> &result_recv_dists, int d) {
 
+    // Iterate through the received results and find final top d results for each query label.
     for (int i = 0; i < result_recv_labels.size(); ++i)
     {
+        std::vector<int> checked_labels;
         int query_label = result_recv_labels[i];
         for (int j = 0; j < d; ++j)
         {
             int idx = i * d + j;
-            (*query_results)[query_label].emplace(result_recv_dists[idx], result_recv_ids[idx]);
+            int result_label = result_recv_ids[idx];
+            float result_dist = result_recv_dists[idx];
+            if (std::find(checked_labels.begin(), checked_labels.end(), result_label) != checked_labels.end())
+                continue;
+
+            (*query_results)[query_label].emplace(result_dist, result_label);
+            checked_labels.push_back(result_label);
 
             auto &pq = (*query_results)[query_label];
             while (pq.size() > d)
@@ -550,8 +539,7 @@ void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pa
 }
 
 void distribute_final_results_to_root(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> &query_results, 
-    std::vector<int> *gathered_labels, std::vector<int> *gathered_ids,
-    std::vector<float> *gathered_dists) {
+    std::vector<int> *gathered_labels, std::vector<int> *gathered_ids, std::vector<float> *gathered_dists) {
 
     int rank, world_size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -580,8 +568,6 @@ void distribute_final_results_to_root(std::unordered_map<int, std::priority_queu
             flat_final_result_dists.push_back(dist);
         }
     }
-
-    std::cout << "Rank: " << rank << " Local results prepared for " << flat_final_query_labels.size() << " queries." << std::endl;
 
     int final_query_label_send_count = flat_final_query_labels.size();
     std::vector<int> final_query_label_recv_counts(world_size), final_query_label_displs(world_size);
@@ -623,8 +609,6 @@ void distribute_final_results_to_root(std::unordered_map<int, std::priority_queu
     MPI_Gatherv(flat_final_result_dists.data(), final_result_send_count, MPI_FLOAT,
                 gathered_dists->data(), final_result_recv_counts.data(), final_result_displs.data(), MPI_FLOAT,
                 0, MPI_COMM_WORLD);
-
-    std::cout << "Rank: " << rank << " Gathered results from all processes." << std::endl;
 }
 
 double calculate_recall(const std::vector<int> &gathered_labels, const std::vector<int> &gathered_ids, uint32_t *&I, int d)
@@ -695,7 +679,7 @@ int main(int argc, char **argv)
 
     sparse_hnswlib::InnerProductSpace space(dim);
     sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw =
-        new sparse_hnswlib::HierarchicalNSW<float>(&space, datamatrix, global_sample_size, M, ef_construction);
+        new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix, global_sample_size, M, ef_construction);
     for (int i = 0; i < global_sample_size; i++)
     {
         meta_hnsw->addPoint(i, i);
@@ -822,7 +806,7 @@ int main(int argc, char **argv)
     std::unordered_map<int, std::priority_queue<std::pair<float, int>>> query_results;
     calculate_final_results(&query_results, result_recv_labels, result_recv_ids, result_recv_dists, d);
 
-    std::cout << "Rank: " << rank << " Search completed for " << local_query_input_size << " queries." << std::endl;
+    std::cout << "Rank: " << rank << " Calculated final results for " << local_query_input_size << " queries." << std::endl;
 
     double search_end = MPI_Wtime();
     double local_search_duration = search_end - search_start;
