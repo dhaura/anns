@@ -1,4 +1,3 @@
-#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <vector>
 #include <cstdlib>
@@ -8,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <omp.h>
 #include <mpi.h>
 #include <hnswlib.h>
 #include <csr_matrix.h>
@@ -293,6 +293,11 @@ void greedy_grouping(CSRMatrix *sampled_matrix, int w, int sample_size, int dim,
             group_sizes[best_group]++;
         }
     }
+
+    for (int i = 0; i < group_sizes.size(); ++i)
+    {
+        std::cout << "Group " << i << " size: " << group_sizes[i] << std::endl;
+    }
 }
 
 double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatrix, std::vector<int> *recv_label_buffer, sparse_hnswlib::HierarchicalNSW<float> &meta_hnsw,
@@ -483,7 +488,6 @@ void distribute_local_results(std::vector<std::vector<int>> &query_labels_to_sen
         local_flat_query_labels.insert(local_flat_query_labels.end(), query_labels_to_send[i].begin(), query_labels_to_send[i].end());
     }
 
-
     // Gather the sizes of results and labels to be received from each process.
     MPI_Alltoall(query_label_send_counts.data(), 1, MPI_INT, query_label_recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
     MPI_Alltoall(result_send_counts.data(), 1, MPI_INT, result_recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
@@ -510,10 +514,11 @@ void distribute_local_results(std::vector<std::vector<int>> &query_labels_to_sen
                   result_recv_dists->data(), result_recv_counts.data(), result_recv_offsets.data(), MPI_FLOAT, MPI_COMM_WORLD);
 }
 
-void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> *query_results, 
+void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> *query_results,
                              std::vector<int> &result_recv_labels,
                              std::vector<int> &result_recv_ids,
-                             std::vector<float> &result_recv_dists, int d) {
+                             std::vector<float> &result_recv_dists, int d)
+{
 
     // Iterate through the received results and find final top d results for each query label.
     for (int i = 0; i < result_recv_labels.size(); ++i)
@@ -538,8 +543,9 @@ void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pa
     }
 }
 
-void distribute_final_results_to_root(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> &query_results, 
-    std::vector<int> *gathered_labels, std::vector<int> *gathered_ids, std::vector<float> *gathered_dists) {
+void distribute_final_results_to_root(std::unordered_map<int, std::priority_queue<std::pair<float, int>>> &query_results,
+                                      std::vector<int> *gathered_labels, std::vector<int> *gathered_ids, std::vector<float> *gathered_dists)
+{
 
     int rank, world_size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -559,7 +565,6 @@ void distribute_final_results_to_root(std::unordered_map<int, std::priority_queu
             sorted_pq.push_back(copy_pq.top());
             copy_pq.pop();
         }
-        std::reverse(sorted_pq.begin(), sorted_pq.end());
 
         flat_final_query_labels.push_back(label);
         for (auto &[dist, id] : sorted_pq)
@@ -629,6 +634,23 @@ double calculate_recall(const std::vector<int> &gathered_labels, const std::vect
         }
 
         total_hits += hit_count;
+
+        if (i == 0)
+        {
+            // print results and gt.
+            std::cout << "Query label: " << query_label << "\n";
+            std::cout << "Predicted IDs: ";
+            for (int pid : pred_ids)
+            {
+                std::cout << pid << " ";
+            }
+            std::cout << "\nGround Truth IDs: ";
+            for (int gt_pid : gt_neighbors)
+            {
+                std::cout << gt_pid << " ";
+            }
+            std::cout << std::endl;
+        }
     }
 
     return static_cast<double>(total_hits) / (gathered_labels.size() * d);
@@ -661,6 +683,18 @@ int main(int argc, char **argv)
 
     CSRMatrix *datamatrix = read_csr(input_filepath, rank, world_size);
 
+    // Print basic info about the input data matrix and hyperparameters.
+    if (rank == 0)
+    {
+        std::cout << "Input data matrix loaded. Global shape: (" << datamatrix  ->global_nrow << ", " << datamatrix->ncol << "), Global nnz: " << datamatrix->global_nnz << std::endl;
+        std::cout << "Hyperparameters: " << std::endl;
+        std::cout << "  Global sample size: " << global_sample_size << std::endl;
+        std::cout << "  m: " << m << std::endl;
+        std::cout << "  k: " << k << std::endl;
+        std::cout << "  M: " << M << std::endl;
+        std::cout << "  ef_construction: " << ef_construction << std::endl;
+    }
+
     int input_size = datamatrix->nrow;
     int dim = datamatrix->ncol;
     int max_elements = datamatrix->nrow;
@@ -680,6 +714,7 @@ int main(int argc, char **argv)
     sparse_hnswlib::InnerProductSpace space(dim);
     sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw =
         new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix, global_sample_size, M, ef_construction);
+    #pragma omp parallel for
     for (int i = 0; i < global_sample_size; i++)
     {
         meta_hnsw->addPoint(i, i);
@@ -723,7 +758,14 @@ int main(int argc, char **argv)
         std::cout << "Local HNSW index initialized." << std::endl;
     }
 
+    int num_threads = omp_get_max_threads();
+    if (rank == 0)
+    {
+        std::cout << "Using " << num_threads << " threads for HNSW construction and search." << std::endl;
+    }
+
     // Add data to hnsw index.
+    #pragma omp parallel for
     for (int i = 0; i < local_input_size; i++)
     {
         local_hnsw->addPoint(i, i);
@@ -766,6 +808,8 @@ int main(int argc, char **argv)
     std::vector<std::vector<int>> query_labels_to_send(world_size);
     std::vector<std::vector<int>> result_ids_to_send(world_size);
     std::vector<std::vector<float>> result_dists_to_send(world_size);
+
+    local_hnsw->ef_ = 200 ; // Set ef for search.
 
     // Process all received queries.
     if (local_query_input_size > 0)

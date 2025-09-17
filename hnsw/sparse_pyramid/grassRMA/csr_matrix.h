@@ -57,6 +57,9 @@ public:
     infile.read((char *)&ncol, sizeof(int64_t));
     infile.read((char *)&nnz, sizeof(int64_t));
 
+    global_nrow = nrow;
+    global_nnz = nnz;
+
     indptr = new int64_t[nrow + 1];
     infile.read((char *)indptr, (nrow + 1) * sizeof(int64_t));
     indices_data = new IndiceDataPair[nnz];
