@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {0..4}; do
+for i in {0..3}; do
     NUM_OF_NODES=1
     TASKS_PER_NODE=$((2**i))
     CPUS_PER_TASK=32

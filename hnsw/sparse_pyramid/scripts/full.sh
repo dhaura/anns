@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=__TASKS_PER_NODE__
 #SBATCH --cpus-per-task=__CPUS_PER_TASK__
 #SBATCH --constraint=cpu
-#SBATCH --output=logs/%j.log
+#SBATCH --output=logs/full___TASKS_PER_NODE___%j.log
 
 export OMP_NUM_THREADS=__CPUS_PER_TASK__
 
