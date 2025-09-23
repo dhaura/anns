@@ -304,7 +304,9 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
                               std::vector<int> &sample_to_group, int k, int input_size, int dim, int rank, int world_size)
 {
 
-    int label_offset = rank * (input_size / world_size);
+    int global_input_size = datamatrix->global_nrow;
+    int label_offset = rank * (global_input_size / world_size);
+
     std::vector<std::vector<int64_t>> labels_to_send(world_size);
     std::vector<std::vector<int64_t>> indptr_to_send(world_size);
     std::vector<std::vector<int32_t>> indices_to_send(world_size);
@@ -521,20 +523,24 @@ void calculate_final_results(std::unordered_map<int, std::priority_queue<std::pa
 {
 
     // Iterate through the received results and find final top d results for each query label.
+    std::unordered_map<int, std::vector<int>> checked_labels_map;
     for (int i = 0; i < result_recv_labels.size(); ++i)
     {
-        std::vector<int> checked_labels;
         int query_label = result_recv_labels[i];
+        if (checked_labels_map.find(query_label) == checked_labels_map.end())
+        {
+            checked_labels_map[query_label] = std::vector<int>();
+        }
         for (int j = 0; j < d; ++j)
         {
             int idx = i * d + j;
             int result_label = result_recv_ids[idx];
             float result_dist = result_recv_dists[idx];
-            if (std::find(checked_labels.begin(), checked_labels.end(), result_label) != checked_labels.end())
+            if (std::find(checked_labels_map[query_label].begin(), checked_labels_map[query_label].end(), result_label) != checked_labels_map[query_label].end())
                 continue;
 
             (*query_results)[query_label].emplace(result_dist, result_label);
-            checked_labels.push_back(result_label);
+            checked_labels_map[query_label].push_back(result_label);
 
             auto &pq = (*query_results)[query_label];
             while (pq.size() > d)
@@ -558,19 +564,15 @@ void distribute_final_results_to_root(std::unordered_map<int, std::priority_queu
     for (const auto &[label, pq] : query_results)
     {
         std::priority_queue<std::pair<float, int>> copy_pq = pq;
-        std::vector<std::pair<float, int>> sorted_pq;
-
-        while (!copy_pq.empty())
-        {
-            sorted_pq.push_back(copy_pq.top());
-            copy_pq.pop();
-        }
 
         flat_final_query_labels.push_back(label);
-        for (auto &[dist, id] : sorted_pq)
+        while (!copy_pq.empty())
         {
+            float dist = copy_pq.top().first;
+            int id = copy_pq.top().second;
             flat_final_result_ids.push_back(id);
             flat_final_result_dists.push_back(dist);
+            copy_pq.pop();
         }
     }
 

@@ -10,6 +10,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find OpenMP
 find_package(OpenMP REQUIRED)
 
+# Include GrassRMA HNSW library
+include_directories(${CMAKE_SOURCE_DIR}/grassRMA)
+link_directories(${CMAKE_SOURCE_DIR}/grassRMA)
+
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -funroll-loops -ffast-math -fstrict-aliasing -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -march=native -funroll-loops -ffast-math -fstrict-aliasing -g -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra -Wpedantic")
