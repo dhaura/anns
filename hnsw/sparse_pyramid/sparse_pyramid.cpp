@@ -667,9 +667,9 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc < 9)
+    if (argc < 10)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_filepath> <global_sample_size> <m> <branching_factor> <M> <ef_construction> <query_filepath> <gt_filepath>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_filepath> <global_sample_size> <m> <branching_factor> <branching_factor_search> <M> <ef_construction> <query_filepath> <gt_filepath>" << std::endl;
         return 1;
     }
 
@@ -678,10 +678,11 @@ int main(int argc, char **argv)
     int global_sample_size = std::stoi(argv[2]);
     int m = std::stoi(argv[3]);
     int k = std::stoi(argv[4]);
-    int M = std::stoi(argv[5]);
-    int ef_construction = std::stoi(argv[6]);
-    std::string query_filepath = argv[7];
-    std::string gt_filepath = argv[8];
+    int k_search = std::stoi(argv[5]);
+    int M = std::stoi(argv[6]);
+    int ef_construction = std::stoi(argv[7]);
+    std::string query_filepath = argv[8];
+    std::string gt_filepath = argv[9];
 
     CSRMatrix *datamatrix = read_csr(input_filepath, rank, world_size);
 
@@ -693,6 +694,7 @@ int main(int argc, char **argv)
         std::cout << "  Global sample size: " << global_sample_size << std::endl;
         std::cout << "  m: " << m << std::endl;
         std::cout << "  k: " << k << std::endl;
+        std::cout << "  k_search: " << k_search << std::endl;
         std::cout << "  M: " << M << std::endl;
         std::cout << "  ef_construction: " << ef_construction << std::endl;
     }
@@ -803,7 +805,7 @@ int main(int argc, char **argv)
 
     std::vector<int> local_query_labels;
     CSRMatrix *local_query_datamatrix;
-    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k, query_input_size, dim, rank, world_size);
+    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k_search, query_input_size, dim, rank, world_size);
 
     int local_query_input_size = local_query_datamatrix->nrow;
 
