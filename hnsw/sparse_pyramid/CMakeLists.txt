@@ -20,9 +20,27 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -Wall -Wextra -Wpedantic")
 
 # Add the executable
 add_executable(sparse_pyramid sparse_pyramid.cpp)
+add_executable(sparse_pyramid_v2 sparse_pyramid_v2.cpp)
+add_executable(sparse_pyramid_v3 sparse_pyramid_v3.cpp)
+add_executable(sparse_pyramid_v4 sparse_pyramid_v4.cpp)
 
-# Link against OpenCV and MPI
+# Link against OpenMP and MPI
 target_link_libraries(sparse_pyramid
+    MPI::MPI_CXX
+    OpenMP::OpenMP_CXX
+)
+
+target_link_libraries(sparse_pyramid_v2
+    MPI::MPI_CXX
+    OpenMP::OpenMP_CXX
+)
+
+target_link_libraries(sparse_pyramid_v3
+    MPI::MPI_CXX
+    OpenMP::OpenMP_CXX
+)
+
+target_link_libraries(sparse_pyramid_v4
     MPI::MPI_CXX
     OpenMP::OpenMP_CXX
 )

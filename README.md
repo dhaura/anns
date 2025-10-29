@@ -148,10 +148,14 @@ make
 ## 3. Run
 ### 3.1 Allocate Resources
 ```bash
-salloc --nodes 1 --tasks-per-node 8 --cpus-per-task 32 --time 00=1:00:00 --mem 100GB --constraint cpu --qos interactive
+salloc --nodes 1 --tasks-per-node 16 --cpus-per-task 16 --time 02:00:00 --constraint cpu --qos interactive
 ```
 
 ### 3.2 Run
 ```bash
-srun -n 1 ./sparse_pyramid $SCRATCH/datasets/SpKNN/grassRMA/base_small.csr 200 12 2 16 200 $SCRATCH/datasets/SpKNN/grassRMA/queries.dev.csr $SCRATCH/datasets/SpKNN/grassRMA/base_small.dev.gt
+srun -n 1 ./sparse_pyramid $SCRATCH/datasets/SpKNN/grassRMA/base_full.csr 80000 80000 1 1 16 200 $SCRATCH/datasets/SpKNN/grassRMA/queries.dev.csr $SCRATCH/datasets/SpKNN/grassRMA/base_full.dev.gt
+```
+
+```bash
+srun -n 64 ./sparse_pyramid_v2 $SCRATCH/datasets/SpKNN/grassRMA/base_full.csr 16000 160 2 2 16 200 $SCRATCH/datasets/SpKNN/grassRMA/queries.dev.csr $SCRATCH/datasets/SpKNN/grassRMA/base_full.dev.gt
 ```

@@ -300,8 +300,9 @@ void greedy_grouping(CSRMatrix *sampled_matrix, int w, int sample_size, int dim,
     // }
 }
 
-double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatrix, std::vector<int> *recv_label_buffer, sparse_hnswlib::HierarchicalNSW<float> &meta_hnsw,
-                              std::vector<int> &sample_to_group, int k, int input_size, int dim, int rank, int world_size)
+double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatrix, std::vector<int> *recv_label_buffer, sparse_hnswlib::HierarchicalNSW<float> &meta_hnsw_1, 
+                              sparse_hnswlib::HierarchicalNSW<float> &meta_hnsw_2, std::vector<int> &sample_to_group_1,
+                              std::vector<int> &sample_to_group_2, int k, int input_size, int dim, int rank, int world_size)
 {
 
     int global_input_size = datamatrix->global_nrow;
@@ -318,18 +319,44 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     double activations = 0.0;
     for (int i = 0; i < datamatrix->nrow; ++i)
     {
-        std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> samples = meta_hnsw.searchKnn(i, k, datamatrix);
+        std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> samples_1 = meta_hnsw_1.searchKnn(i, k, datamatrix);
 
         std::unordered_set<int> visited_groups;
         int label = label_offset + i;
 
         int start = datamatrix->indptr[i];
         int end = datamatrix->indptr[i + 1];
-        while (!samples.empty())
+        while (!samples_1.empty())
         {
-            int sample = samples.top().second;
-            samples.pop();
-            int group = sample_to_group[sample];
+            int sample = samples_1.top().second;
+            samples_1.pop();
+            int group = sample_to_group_1[sample];
+
+            if (visited_groups.find(group) != visited_groups.end())
+            {
+                continue;
+            }
+
+            labels_to_send[group].push_back(label);
+            indptr_to_send[group].push_back(current_indptr[group]);
+            for (int j = start; j < end; ++j)
+            {
+                indices_to_send[group].push_back(datamatrix->indices_data[j].indice);
+                data_to_send[group].push_back(datamatrix->indices_data[j].data);
+            }
+
+            visited_groups.insert(group);
+            activations++;
+
+            current_indptr[group] += (end - start);
+        }
+
+        std::priority_queue<std::pair<float, sparse_hnswlib::labeltype>> samples_2 = meta_hnsw_2.searchKnn(i, k, datamatrix);
+        while (!samples_2.empty())
+        {
+            int sample = samples_2.top().second;
+            samples_2.pop();
+            int group = sample_to_group_2[sample];
 
             if (visited_groups.find(group) != visited_groups.end())
             {
@@ -707,44 +734,75 @@ int main(int argc, char **argv)
     double hnsw_build_start = MPI_Wtime();
 
     int sample_size = global_sample_size / world_size;
-    CSRMatrix *sample_matrix = sample_input(datamatrix, sample_size, global_sample_size, MPI_COMM_WORLD);
+    CSRMatrix *sample_matrix_1 = sample_input(datamatrix, sample_size, global_sample_size, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+    CSRMatrix *sample_matrix_2 = sample_input(datamatrix, sample_size, global_sample_size, MPI_COMM_WORLD);
 
     if (rank == 0)
     {
-        std::cout << "Data sampling completed. Sampled " << sample_matrix->nrow << " rows with nnz: "
-                  << sample_matrix->nnz << " from the input data matrix." << std::endl;
+        std::cout << "Data sampling completed." << std::endl;
+        std::cout << "1 - Sampled " << sample_matrix_1->nrow << " rows with nnz: "
+                  << sample_matrix_1->nnz << " from the input data matrix." << std::endl;
+        std::cout << "2 - Sampled " << sample_matrix_2->nrow << " rows with nnz: "
+                  << sample_matrix_2->nnz << " from the input data matrix." << std::endl;
     }
 
     sparse_hnswlib::InnerProductSpace space(dim);
-    sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw =
-        new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix, global_sample_size, M, ef_construction);
+    sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw_1 =
+        new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix_1, global_sample_size, M, ef_construction);
     #pragma omp parallel for
     for (int i = 0; i < global_sample_size; i++)
     {
-        meta_hnsw->addPoint(i, i);
+        meta_hnsw_1->addPoint(i, i);
     }
 
     if (rank == 0)
     {
-        std::cout << "Meta HNSW index built with " << global_sample_size << " samples." << std::endl;
+        std::cout << "Meta HNSW index 1 built with " << global_sample_size << " samples." << std::endl;
     }
 
-    std::vector<int> sample_to_group(global_sample_size);
+    std::vector<int> sample_to_group_1(global_sample_size);
 
     if (rank == 0)
     {
-        greedy_grouping(sample_matrix, world_size, global_sample_size, dim, *meta_hnsw, k, sample_to_group);
+        greedy_grouping(sample_matrix_1, world_size, global_sample_size, dim, *meta_hnsw_1, k, sample_to_group_1);
     }
-    MPI_Bcast(sample_to_group.data(), global_sample_size, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(sample_to_group_1.data(), global_sample_size, MPI_INT, 0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {
-        std::cout << "Greedy grouping completed.\n";
+        std::cout << "Greedy grouping 1 completed.\n";
+    }
+
+    sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw_2 =
+        new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix_2, global_sample_size, M, ef_construction);
+    #pragma omp parallel for
+    for (int i = 0; i < global_sample_size; i++)
+    {
+        meta_hnsw_2->addPoint(i, i);
+    }
+
+    if (rank == 0)
+    {
+        std::cout << "Meta HNSW index 2 built with " << global_sample_size << " samples." << std::endl;
+    }
+
+    std::vector<int> sample_to_group_2(global_sample_size);
+
+    if (rank == 0)
+    {
+        greedy_grouping(sample_matrix_2, world_size, global_sample_size, dim, *meta_hnsw_2, k, sample_to_group_2);
+    }
+    MPI_Bcast(sample_to_group_2.data(), global_sample_size, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (rank == 0)
+    {
+        std::cout << "Greedy grouping 2 completed.\n";
     }
 
     std::vector<int> local_labels;
     CSRMatrix *local_datamatrix;
-    double distributions = distribute_data_matrix(datamatrix, &local_datamatrix, &local_labels, *meta_hnsw, sample_to_group, k, input_size, dim, rank, world_size);
+    double distributions = distribute_data_matrix(datamatrix, &local_datamatrix, &local_labels, *meta_hnsw_1, *meta_hnsw_2, sample_to_group_1, sample_to_group_2, k, input_size, dim, rank, world_size);
 
     double global_distributions;
     MPI_Reduce(&distributions, &global_distributions, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -820,7 +878,7 @@ int main(int argc, char **argv)
 
     std::vector<int> local_query_labels;
     CSRMatrix *local_query_datamatrix;
-    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k_search, query_input_size, dim, rank, world_size);
+    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw_1, *meta_hnsw_2, sample_to_group_1, sample_to_group_2, k_search, query_input_size, dim, rank, world_size);
 
     int local_query_input_size = local_query_datamatrix->nrow;
 

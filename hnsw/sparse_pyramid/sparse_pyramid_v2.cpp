@@ -12,6 +12,12 @@
 #include <hnswlib.h>
 #include <csr_matrix.h>
 
+#include <unordered_map>
+#include <unordered_set>
+#include <random>
+#include <limits>
+
+
 using Float2DVector = std::vector<std::vector<float>>;
 using Float2DPairVector = std::vector<std::pair<int, std::vector<float>>>;
 
@@ -658,6 +664,132 @@ double calculate_recall(const std::vector<int> &gathered_labels, const std::vect
     return static_cast<double>(total_hits) / (gathered_labels.size() * d);
 }
 
+
+
+// Extract a row from CSRMatrix
+std::vector<IndiceDataPair> get_row(const CSRMatrix& mat, int row_idx) {
+    std::vector<IndiceDataPair> row;
+    for (int64_t i = mat.indptr[row_idx]; i < mat.indptr[row_idx + 1]; ++i) {
+        row.push_back(mat.indices_data[i]);
+    }
+    return row;
+}
+
+// Compute inner product (MIPS)
+float inner_product(const std::vector<IndiceDataPair>& a, const std::vector<IndiceDataPair>& b) {
+    float result = 0.0f;
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (a[i].indice == b[j].indice) {
+            result += a[i].data * b[j].data;
+            ++i; ++j;
+        } else if (a[i].indice < b[j].indice) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return result;
+}
+
+// K-Medoids using MIPS
+std::vector<int> kmedoids_mips(const CSRMatrix& mat, int k, int max_iter = 100) {
+    int n = mat.nrow;
+    std::vector<int> medoids;
+    std::unordered_map<int, std::vector<int>> clusters;
+    std::default_random_engine rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, n - 1);
+
+    std::unordered_set<int> selected;
+    while (medoids.size() < k) {
+        int idx = dist(rng);
+        if (selected.insert(idx).second) {
+            medoids.push_back(idx);
+        }
+    }
+
+    for (int iter = 0; iter < max_iter; ++iter) {
+        clusters.clear();
+
+        for (int i = 0; i < n; ++i) {
+            float max_ip = -std::numeric_limits<float>::infinity();
+            int best_medoid = -1;
+            auto row_i = get_row(mat, i);
+
+            for (int m : medoids) {
+                auto row_m = get_row(mat, m);
+                float ip = inner_product(row_i, row_m);
+                if (ip > max_ip) {
+                    max_ip = ip;
+                    best_medoid = m;
+                }
+            }
+            clusters[best_medoid].push_back(i);
+        }
+
+        bool changed = false;
+        std::vector<int> new_medoids;
+        for (auto& [medoid, members] : clusters) {
+            float best_score = -std::numeric_limits<float>::infinity();
+            int best_member = medoid;
+
+            for (int candidate : members) {
+                float total_ip = 0.0f;
+                auto row_c = get_row(mat, candidate);
+                for (int other : members) {
+                    if (candidate == other) continue;
+                    auto row_o = get_row(mat, other);
+                    total_ip += inner_product(row_c, row_o);
+                }
+                if (total_ip > best_score) {
+                    best_score = total_ip;
+                    best_member = candidate;
+                }
+            }
+            new_medoids.push_back(best_member);
+            if (best_member != medoid) changed = true;
+        }
+
+        if (!changed) break;
+        medoids = new_medoids;
+    }
+
+    return medoids;
+}
+
+// Updated extract_medoids using the specified CSRMatrix constructor
+CSRMatrix *extract_medoids(const CSRMatrix& mat, const std::vector<int>& medoid_indices) {
+    int64_t new_nrow = medoid_indices.size();
+    int64_t new_ncol = mat.ncol;
+
+    std::vector<int64_t> new_indptr(new_nrow + 1, 0);
+    std::vector<int32_t> new_indices;
+    std::vector<float> new_data;
+
+    int64_t nnz_counter = 0;
+
+    for (size_t i = 0; i < medoid_indices.size(); ++i) {
+        int row = medoid_indices[i];
+        for (int64_t j = mat.indptr[row]; j < mat.indptr[row + 1]; ++j) {
+            new_indices.push_back(mat.indices_data[j].indice);
+            new_data.push_back(mat.indices_data[j].data);
+            ++nnz_counter;
+        }
+        new_indptr[i + 1] = nnz_counter;
+    }
+
+    return new CSRMatrix(
+        new_nrow,
+        new_ncol,
+        nnz_counter,
+        new_nrow,         // global_nrow
+        nnz_counter,      // global_nnz
+        new_indptr.data(),
+        new_indices.data(),
+        new_data.data()
+    );
+}
+
 int main(int argc, char **argv)
 {
 
@@ -715,27 +847,79 @@ int main(int argc, char **argv)
                   << sample_matrix->nnz << " from the input data matrix." << std::endl;
     }
 
+    CSRMatrix *medoid_matrix;
+
+    if (rank == 0)
+    {
+        std::cout << "Starting k-medoids clustering for initial grouping..." << std::endl;
+        std::vector<int> medoid_indices = kmedoids_mips(*sample_matrix, m);
+        medoid_matrix = extract_medoids(*sample_matrix, medoid_indices);
+        std::cout << "K-medoids clustering completed. Reduced sample size to " << medoid_matrix->nrow << "." << std::endl;
+
+        // Broadcast scalars
+        int64_t scalars[5] = {medoid_matrix->nrow, medoid_matrix->ncol, medoid_matrix->nnz, medoid_matrix->global_nrow, medoid_matrix->global_nnz};
+        MPI_Bcast(scalars, 5, MPI_INT64_T, 0, MPI_COMM_WORLD);
+
+        // Broadcast arrays
+        MPI_Bcast(medoid_matrix->indptr, medoid_matrix->nrow + 1, MPI_INT64_T, 0, MPI_COMM_WORLD);
+
+        std::vector<int32_t> indices(medoid_matrix->nnz);
+        std::vector<float> data(medoid_matrix->nnz);
+        for (int64_t i = 0; i < medoid_matrix->nnz; ++i) {
+            indices[i] = medoid_matrix->indices_data[i].indice;
+            data[i] = medoid_matrix->indices_data[i].data;
+        }
+
+        MPI_Bcast(indices.data(), medoid_matrix->nnz, MPI_INT32_T, 0, MPI_COMM_WORLD);
+        MPI_Bcast(data.data(), medoid_matrix->nnz, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+        // std::cout << "Rank: " << rank << " Broadcasted medoid matrix to all processes." << std::endl;
+    } else {
+        int64_t scalars[5];
+        MPI_Bcast(scalars, 5, MPI_INT64_T, 0, MPI_COMM_WORLD);
+
+        int64_t nrow = scalars[0];
+        int64_t ncol = scalars[1];
+        int64_t nnz = scalars[2];
+        int64_t global_nrow = scalars[3];
+        int64_t global_nnz = scalars[4];
+
+        int64_t* indptr = new int64_t[nrow + 1];
+        MPI_Bcast(indptr, nrow + 1, MPI_INT64_T, 0, MPI_COMM_WORLD);
+
+        std::vector<int32_t> indices(nnz);
+        std::vector<float> data(nnz);
+        MPI_Bcast(indices.data(), nnz, MPI_INT32_T, 0, MPI_COMM_WORLD);
+        MPI_Bcast(data.data(), nnz, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+        // Reconstruct the CSRMatrix
+        medoid_matrix = new CSRMatrix(nrow, ncol, nnz, global_nrow, global_nnz, indptr, indices.data(), data.data());
+        // std::cout << "Rank: " << rank << " Received medoid matrix with shape (" << medoid_matrix->nrow << ", " << medoid_matrix->ncol << ") and nnz: " << medoid_matrix->nnz << std::endl;
+    }
+
+    int num_k_medoids = medoid_matrix->nrow;
+
     sparse_hnswlib::InnerProductSpace space(dim);
     sparse_hnswlib::HierarchicalNSW<float> *meta_hnsw =
-        new sparse_hnswlib::HierarchicalNSW<float>(&space, sample_matrix, global_sample_size, M, ef_construction);
+        new sparse_hnswlib::HierarchicalNSW<float>(&space, medoid_matrix, num_k_medoids, M, ef_construction);
     #pragma omp parallel for
-    for (int i = 0; i < global_sample_size; i++)
+    for (int i = 0; i < num_k_medoids; i++)
     {
         meta_hnsw->addPoint(i, i);
     }
 
     if (rank == 0)
     {
-        std::cout << "Meta HNSW index built with " << global_sample_size << " samples." << std::endl;
+        std::cout << "Meta HNSW index built with " << num_k_medoids << " k medoids." << std::endl;
     }
 
-    std::vector<int> sample_to_group(global_sample_size);
+    std::vector<int> sample_to_group(num_k_medoids);
 
     if (rank == 0)
     {
-        greedy_grouping(sample_matrix, world_size, global_sample_size, dim, *meta_hnsw, k, sample_to_group);
+        greedy_grouping(medoid_matrix, world_size, num_k_medoids, dim, *meta_hnsw, k, sample_to_group);
     }
-    MPI_Bcast(sample_to_group.data(), global_sample_size, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(sample_to_group.data(), num_k_medoids, MPI_INT, 0, MPI_COMM_WORLD);
 
     if (rank == 0)
     {

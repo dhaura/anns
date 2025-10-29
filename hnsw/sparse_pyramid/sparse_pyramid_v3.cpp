@@ -448,6 +448,140 @@ double distribute_data_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatri
     return activations;
 }
 
+double distribute_query_matrix(CSRMatrix *datamatrix, CSRMatrix **local_datamatrix, std::vector<int> *recv_label_buffer,
+                              int input_size, int dim, int rank, int world_size)
+{
+
+    int global_input_size = datamatrix->global_nrow;
+    int label_offset = rank * (global_input_size / world_size);
+
+    std::vector<std::vector<int64_t>> labels_to_send(world_size);
+    std::vector<std::vector<int64_t>> indptr_to_send(world_size);
+    std::vector<std::vector<int32_t>> indices_to_send(world_size);
+    std::vector<std::vector<float>> data_to_send(world_size);
+
+    std::vector<int64_t> current_indptr(world_size, 0);
+
+    // Iterate through each element in the datamatrix and find which processors should handle them.
+    double activations = 0.0;
+    for (int i = 0; i < datamatrix->nrow; ++i)
+    {
+        int label = label_offset + i;
+
+        int start = datamatrix->indptr[i];
+        int end = datamatrix->indptr[i + 1];
+        for (int j = 0; j < world_size; ++j)
+        {
+            labels_to_send[j].push_back(label);
+            indptr_to_send[j].push_back(current_indptr[j]);
+            for (int l = start; l < end; ++l)
+            {
+                indices_to_send[j].push_back(datamatrix->indices_data[l].indice);
+                data_to_send[j].push_back(datamatrix->indices_data[l].data);
+            }
+
+            current_indptr[j] += (end - start);
+            activations++;
+        }
+    }
+
+    std::vector<int> send_label_buffer;
+    std::vector<int64_t> send_indptr_buffer;
+    std::vector<int> send_label_counts(world_size), recv_label_counts(world_size);
+    // Flatten the labels_to_send and indptr_to_send.
+    for (int i = 0; i < world_size; ++i)
+    {
+        send_label_counts[i] = labels_to_send[i].size();
+        send_label_buffer.insert(send_label_buffer.end(), labels_to_send[i].begin(), labels_to_send[i].end());
+        send_indptr_buffer.insert(send_indptr_buffer.end(), indptr_to_send[i].begin(), indptr_to_send[i].end());
+    }
+
+    // Gather the sizes of the data to be received from each process.
+    MPI_Alltoall(send_label_counts.data(), 1, MPI_INT, recv_label_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    // Calculate the displacements (offsets) for send and receive buffers for each processor.
+    std::vector<int> send_label_offsets(world_size, 0), recv_label_offsets(world_size, 0);
+    for (int i = 1; i < world_size; ++i)
+    {
+        send_label_offsets[i] = send_label_offsets[i - 1] + send_label_counts[i - 1];
+        recv_label_offsets[i] = recv_label_offsets[i - 1] + recv_label_counts[i - 1];
+    }
+
+    int total_recv_label_count = recv_label_offsets.back() + recv_label_counts.back();
+    recv_label_buffer->resize(total_recv_label_count);
+    std::vector<int64_t> recv_indptr_buffer(total_recv_label_count);
+
+    // Distribute the label and indptr buffers across all processes.
+    MPI_Alltoallv(send_label_buffer.data(), send_label_counts.data(), send_label_offsets.data(), MPI_INT,
+                  recv_label_buffer->data(), recv_label_counts.data(), recv_label_offsets.data(), MPI_INT,
+                  MPI_COMM_WORLD);
+
+    MPI_Alltoallv(send_indptr_buffer.data(), send_label_counts.data(), send_label_offsets.data(), MPI_INT64_T,
+                  recv_indptr_buffer.data(), recv_label_counts.data(), recv_label_offsets.data(), MPI_INT64_T,
+                  MPI_COMM_WORLD);
+
+    std::vector<int32_t> send_indices_buffer;
+    std::vector<float> send_data_buffer;
+    std::vector<int> send_data_counts(world_size), recv_data_counts(world_size);
+    // Flatten the indices_to_send and data_to_send.
+    for (int i = 0; i < world_size; ++i)
+    {
+        send_data_counts[i] = data_to_send[i].size();
+        send_indices_buffer.insert(send_indices_buffer.end(), indices_to_send[i].begin(), indices_to_send[i].end());
+        send_data_buffer.insert(send_data_buffer.end(), data_to_send[i].begin(), data_to_send[i].end());
+    }
+
+    // Gather the sizes of the data to be received from each process.
+    MPI_Alltoall(send_data_counts.data(), 1, MPI_INT, recv_data_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+
+    // Calculate the displacements (offsets) for send and receive buffers for each processor.
+    std::vector<int> send_data_offsets(world_size, 0), recv_data_offsets(world_size, 0);
+    for (int i = 1; i < world_size; ++i)
+    {
+        send_data_offsets[i] = send_data_offsets[i - 1] + send_data_counts[i - 1];
+        recv_data_offsets[i] = recv_data_offsets[i - 1] + recv_data_counts[i - 1];
+    }
+
+    int total_recv_data_count = recv_data_offsets.back() + recv_data_counts.back();
+    std::vector<int32_t> recv_indices_buffer(total_recv_data_count);
+    std::vector<float> recv_data_buffer(total_recv_data_count);
+
+    // Distribute the indices and data buffers across all processes.
+    MPI_Alltoallv(send_indices_buffer.data(), send_data_counts.data(), send_data_offsets.data(), MPI_INT32_T,
+                  recv_indices_buffer.data(), recv_data_counts.data(), recv_data_offsets.data(), MPI_INT32_T,
+                  MPI_COMM_WORLD);
+
+    MPI_Alltoallv(send_data_buffer.data(), send_data_counts.data(), send_data_offsets.data(), MPI_FLOAT,
+                  recv_data_buffer.data(), recv_data_counts.data(), recv_data_offsets.data(), MPI_FLOAT,
+                  MPI_COMM_WORLD);
+
+    // Calculate final indptr for the local datamatrix.
+    std::vector<int64_t> final_indptr(total_recv_label_count + 1, 0);
+    int indptr_index_offset = 0;
+    int dataptr_offset = 0;
+    int recv_count_index = 0;
+
+    for (int i = 0; i < recv_indptr_buffer.size(); ++i)
+    {
+        if (i >= indptr_index_offset + recv_label_counts[recv_count_index])
+        {
+            indptr_index_offset += recv_label_counts[recv_count_index];
+            dataptr_offset += recv_data_counts[recv_count_index];
+            recv_count_index++;
+        }
+
+        final_indptr[i] = recv_indptr_buffer[i] + dataptr_offset;
+    }
+
+    dataptr_offset += recv_data_counts[recv_count_index];
+    final_indptr[total_recv_label_count] = recv_data_buffer.size();
+
+    // Build final local datamatrix.
+    *local_datamatrix = new CSRMatrix(total_recv_label_count, dim, total_recv_data_count, datamatrix->global_nrow, datamatrix->global_nnz,
+                                      final_indptr.data(), recv_indices_buffer.data(), recv_data_buffer.data());
+    return activations;
+}
+
 int get_owner(int label, int input_size, int world_size)
 {
 
@@ -749,6 +883,7 @@ int main(int argc, char **argv)
     double global_distributions;
     MPI_Reduce(&distributions, &global_distributions, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
+
     int local_input_size = local_datamatrix->nrow;
     int local_sizes_sum;
     MPI_Reduce(&local_input_size, &local_sizes_sum, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -820,7 +955,7 @@ int main(int argc, char **argv)
 
     std::vector<int> local_query_labels;
     CSRMatrix *local_query_datamatrix;
-    double activations = distribute_data_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, *meta_hnsw, sample_to_group, k_search, query_input_size, dim, rank, world_size);
+    double activations = distribute_query_matrix(query_datamatrix, &local_query_datamatrix, &local_query_labels, query_input_size, dim, rank, world_size);
 
     int local_query_input_size = local_query_datamatrix->nrow;
 

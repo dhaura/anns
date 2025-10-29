@@ -1,13 +1,13 @@
 #!/bin/bash
 
-VERSION=""
+VERSION="_v2"
 NUM_THREADS=32
 CPUS_PER_TASK=32
 MAX_TASKS_PER_NODE=128
 SAMPLE_SIZE=80000
-m=80000
+m=8000
 
-for i in {3..4}; do
+for i in {0..0}; do
     NUM_OF_NODES=1
     TASKS=$((4**i))
 
@@ -30,9 +30,9 @@ for i in {3..4}; do
             sed "s|__VERSION__|$VERSION|" | \
             sed "s|__m__|$m|" | \
             sed "s|__K__|$K|" | \
-            sed "s|__K_SEARCH__|$K_SEARCH|" > "$SCRATCH/benchmarks/SpKNN/anns/hnsw/sparse_pyramid/scripts/temp_full_${TASKS}_${K}_${K_SEARCH}.sh"
+            sed "s|__K_SEARCH__|$K_SEARCH|" > "$SCRATCH/benchmarks/SpKNN/anns/hnsw/sparse_pyramid/scripts/temp_full_${VERSION}_${TASKS}_${K}_${K_SEARCH}.sh"
 
-            sbatch "$SCRATCH/benchmarks/SpKNN/anns/hnsw/sparse_pyramid/scripts/temp_full_${TASKS}_${K}_${K_SEARCH}.sh"
+            sbatch "$SCRATCH/benchmarks/SpKNN/anns/hnsw/sparse_pyramid/scripts/temp_full_${VERSION}_${TASKS}_${K}_${K_SEARCH}.sh"
             sleep 1
 
             K_SEARCH=$((K_SEARCH * 2))
